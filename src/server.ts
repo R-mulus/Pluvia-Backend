@@ -1,38 +1,73 @@
-import express, { type Request, type Response } from 'express';
+import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
+import helmet from 'helmet';
+import { supabase } from './lib/supabase.js';
+import { ComandoCronogramaSchema } from './schemas/comando.schema.js';
 
-// Carrega as variáveis de ambiente (senhas, IPs) de um futuro arquivo .env
-dotenv.config();
-
-// Inicializa o motor do servidor
 const app = express();
 
-// O CORS é o "segurança da porta". Ele permite que o seu aplicativo
-// React Native consiga conversar com este servidor sem ser bloqueado.
-app.use(cors());
+// Por enquanto, deixando aberto para qualquer origem para facilitar os testes
+app.use(cors()); 
 
-// Ensina o servidor a entender dados no formato JSON (que o app vai enviar)
-app.use(express.json());
+// NOTA: Adiciona headers de segurança
+app.use(helmet()); 
 
-// ==========================================
-// ROTA DE TESTE (Para ver se está vivo)
-// ==========================================
-app.get('/', (req: Request, res: Response) => {
-  res.json({
-    status: 'online',
-    mensagem: 'Servidor Pluvia operando normalmente!',
-    data_hora: new Date().toISOString()
-  });
+// TESTE DE CONEXÃO
+const testarConexao = async () => {
+  const { data, error } = await supabase.from('pivos').select('count').limit(1);
+  if (error) {
+    console.error('[CONNECT] Erro crítico de conexão com Supabase:', error.message);
+  } else {
+    console.log('[CONNECT] Conexão com Supabase estabelecida com sucesso');
+  }
+};
+testarConexao();
+
+// ESSA LINHA É OBRIGATÓRIA para o Postman e o App funcionarem:
+app.use(express.json()); 
+
+app.post('/comando/agendar', async (req, res) => {
+  try {
+
+    const dados = ComandoCronogramaSchema.parse(req.body);
+
+    // INSERÇÃO DE CRONOGRAMA
+    const { data: cronograma, error: errCron } = await supabase
+      .from('cronograma')
+      .insert([{
+        pivo_id: dados.pivoId,
+        criado_por: dados.criadoPor,
+        comando: dados.comando,
+        horario: dados.horario,
+        status_final: 'aguardando'
+      }])
+      .select()
+      .single();
+
+    if (errCron) throw errCron;
+
+    // INSERÇÃO DE EVENT_LOGS
+    const { error: errLog } = await supabase
+      .from('event_logs')
+      .insert([{
+        cronograma_id: cronograma.id,
+        pivo_id: dados.pivoId,
+        operador_id: dados.criadoPor,
+        tipo_evento: 'comando',
+        codigo: 'CMD_RECEBIDO'
+      }]);
+
+    if (errLog) throw errLog;
+
+    res.status(201).json({ message: "Sucesso!", id: cronograma.id });
+
+  } catch (error: any) {
+    console.error("[ERROR]", error);
+    res.status(400).json({ 
+      error: "Falha na operação", 
+      detalhes: error.issues || error.message 
+    });
+  }
 });
 
-// ==========================================
-// LIGANDO O SERVIDOR
-// ==========================================
-// Define a porta (usa a do sistema ou a 3000 como padrão)
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor backend rodando na porta ${PORT}`);
-  console.log(`Acesse: http://localhost:${PORT}`);
-});
+app.listen(3000, () => console.log("Backend Pluvia Ativo na porta 3000"));

@@ -19,9 +19,8 @@ app.use(express.json());
 // --- AUXILIARES ---
 const formatPoint = (coord?: string) => coord ? `(${coord})` : null;
 
-// ==========================================
-// CRUD: USUÁRIOS
-// ==========================================
+
+// ---------- USUÁRIOS ----------
 
 app.post('/usuarios', async (req: Request, res: Response) => {
   try {
@@ -79,9 +78,8 @@ app.delete('/usuarios/:id', async (req: Request, res: Response) => {
   res.status(204).send();
 });
 
-// ==========================================
-// CRUD: FAZENDAS
-// ==========================================
+
+// ---------- FAZENDAS ----------
 
 app.post('/fazendas', async (req: Request, res: Response) => {
   try {
@@ -118,6 +116,7 @@ app.delete('/fazendas/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
 
   // REGRA: Fazenda com pivôs vinculados
+
   const { count: pivosCount } = await supabase
     .from('pivos')
     .select('*', { count: 'exact', head: true })
@@ -132,10 +131,8 @@ app.delete('/fazendas/:id', async (req: Request, res: Response) => {
   res.status(204).send();
 });
 
-// ==========================================
-// CRUD: PIVÔS
-// ==========================================
 
+// ---------- PIVÔS ----------
 app.post('/pivos', async (req: Request, res: Response) => {
   try {
     const dados = PivoSchema.parse(req.body);

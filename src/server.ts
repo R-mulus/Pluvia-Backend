@@ -1,73 +1,185 @@
 import express from 'express';
+import type { Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import { supabase } from './lib/supabase.js';
-import { ComandoCronogramaSchema } from './schemas/comando.schema.js';
+import { 
+  UsuarioSchema, UsuarioUpdateSchema,
+  FazendaSchema, FazendaUpdateSchema,
+  PivoSchema, PivoUpdateSchema 
+} from './schemas/cadastro.schema.js';
 
 const app = express();
 
-// Por enquanto, deixando aberto para qualquer origem para facilitar os testes
-app.use(cors()); 
-
-// NOTA: Adiciona headers de segurança
+// --- SEGURANÇA ---
 app.use(helmet()); 
-
-// TESTE DE CONEXÃO
-const testarConexao = async () => {
-  const { data, error } = await supabase.from('pivos').select('count').limit(1);
-  if (error) {
-    console.error('[CONNECT] Erro crítico de conexão com Supabase:', error.message);
-  } else {
-    console.log('[CONNECT] Conexão com Supabase estabelecida com sucesso');
-  }
-};
-testarConexao();
-
-// ESSA LINHA É OBRIGATÓRIA para o Postman e o App funcionarem:
+app.use(cors());   
 app.use(express.json()); 
 
-app.post('/comando/agendar', async (req, res) => {
+// --- AUXILIARES ---
+const formatPoint = (coord?: string) => coord ? `(${coord})` : null;
+
+// ==========================================
+// CRUD: USUÁRIOS
+// ==========================================
+
+app.post('/usuarios', async (req: Request, res: Response) => {
   try {
-
-    const dados = ComandoCronogramaSchema.parse(req.body);
-
-    // INSERÇÃO DE CRONOGRAMA
-    const { data: cronograma, error: errCron } = await supabase
-      .from('cronograma')
-      .insert([{
-        pivo_id: dados.pivoId,
-        criado_por: dados.criadoPor,
-        comando: dados.comando,
-        horario: dados.horario,
-        status_final: 'aguardando'
-      }])
-      .select()
-      .single();
-
-    if (errCron) throw errCron;
-
-    // INSERÇÃO DE EVENT_LOGS
-    const { error: errLog } = await supabase
-      .from('event_logs')
-      .insert([{
-        cronograma_id: cronograma.id,
-        pivo_id: dados.pivoId,
-        operador_id: dados.criadoPor,
-        tipo_evento: 'comando',
-        codigo: 'CMD_RECEBIDO'
-      }]);
-
-    if (errLog) throw errLog;
-
-    res.status(201).json({ message: "Sucesso!", id: cronograma.id });
-
-  } catch (error: any) {
-    console.error("[ERROR]", error);
-    res.status(400).json({ 
-      error: "Falha na operação", 
-      detalhes: error.issues || error.message 
-    });
+    const dados = UsuarioSchema.parse(req.body);
+    const { data, error } = await supabase.from('usuarios').insert([dados]).select().single();
+    if (error) return res.status(400).json({ error: error.message });
+    res.status(201).json(data);
+  } catch (err: any) {
+    res.status(400).json({ error: err.errors || err.message });
   }
 });
 
-app.listen(3000, () => console.log("Backend Pluvia Ativo na porta 3000"));
+app.get('/usuarios', async (req: Request, res: Response) => {
+  const { data, error } = await supabase.from('usuarios').select('*').order('nome');
+  if (error) return res.status(400).json(error);
+  res.json(data);
+});
+
+app.put('/usuarios/:id', async (req: Request, res: Response) => {
+  try {
+    const dados = UsuarioUpdateSchema.parse(req.body);
+    const { data, error } = await supabase.from('usuarios').update(dados).eq('id', req.params.id).select().single();
+    if (error) return res.status(400).json(error);
+    res.json(data);
+  } catch (err: any) {
+    res.status(400).json({ error: err.errors });
+  }
+});
+
+app.delete('/usuarios/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  // REGRA: Usuário dono de fazenda
+  const { count: fazendasCount } = await supabase
+    .from('fazendas')
+    .select('*', { count: 'exact', head: true })
+    .eq('proprietario_id', id);
+
+  if (fazendasCount && fazendasCount > 0) {
+    return res.status(400).json({ error: "Não é possível excluir este usuário pois ele é proprietário de uma ou mais fazendas." });
+  }
+
+  // REGRA: Usuário operador de pivô
+  const { count: operadorCount } = await supabase
+    .from('pivo_operadores')
+    .select('*', { count: 'exact', head: true })
+    .eq('usuario_id', id);
+
+  if (operadorCount && operadorCount > 0) {
+    return res.status(400).json({ error: "Não é possível excluir este usuário pois ele está vinculado como operador de pivôs." });
+  }
+
+  const { error } = await supabase.from('usuarios').delete().eq('id', id);
+  if (error) return res.status(400).json(error);
+  res.status(204).send();
+});
+
+// ==========================================
+// CRUD: FAZENDAS
+// ==========================================
+
+app.post('/fazendas', async (req: Request, res: Response) => {
+  try {
+    const dados = FazendaSchema.parse(req.body);
+    const payload = { ...dados, coordenadas: formatPoint(dados.coordenadas) };
+    const { data, error } = await supabase.from('fazendas').insert([payload]).select().single();
+    if (error) return res.status(400).json(error);
+    res.status(201).json(data);
+  } catch (err: any) {
+    res.status(400).json({ error: err.errors });
+  }
+});
+
+app.get('/fazendas', async (req: Request, res: Response) => {
+  const { data, error } = await supabase.from('fazendas').select('*, usuarios(nome)');
+  if (error) return res.status(400).json(error);
+  res.json(data);
+});
+
+app.put('/fazendas/:id', async (req: Request, res: Response) => {
+  try {
+    const dados = FazendaUpdateSchema.parse(req.body);
+    // @ts-ignore
+    const payload = dados.coordenadas ? { ...dados, coordenadas: formatPoint(dados.coordenadas) } : dados;
+    const { data, error } = await supabase.from('fazendas').update(payload).eq('id', req.params.id).select().single();
+    if (error) return res.status(400).json(error);
+    res.json(data);
+  } catch (err: any) {
+    res.status(400).json({ error: err.errors });
+  }
+});
+
+app.delete('/fazendas/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  // REGRA: Fazenda com pivôs vinculados
+  const { count: pivosCount } = await supabase
+    .from('pivos')
+    .select('*', { count: 'exact', head: true })
+    .eq('fazenda_id', id);
+
+  if (pivosCount && pivosCount > 0) {
+    return res.status(400).json({ error: "Não é possível excluir esta fazenda enquanto houver pivôs vinculados a ela." });
+  }
+
+  const { error } = await supabase.from('fazendas').delete().eq('id', id);
+  if (error) return res.status(400).json(error);
+  res.status(204).send();
+});
+
+// ==========================================
+// CRUD: PIVÔS
+// ==========================================
+
+app.post('/pivos', async (req: Request, res: Response) => {
+  try {
+    const dados = PivoSchema.parse(req.body);
+    // @ts-ignore
+    const payload = { ...dados, coordenadas: formatPoint(dados.coordenadas) };
+    const { data: pivo, error } = await supabase.from('pivos').insert([payload]).select().single();
+    if (error) return res.status(400).json(error);
+
+    // Inicializa Status Automático
+    await supabase.from('pivo_status').insert([{ pivo_id: pivo.id }]);
+
+    res.status(201).json(pivo);
+  } catch (err: any) {
+    res.status(400).json({ error: err.errors });
+  }
+});
+
+app.get('/pivos', async (req: Request, res: Response) => {
+  const { data, error } = await supabase.from('pivos').select('*, fazendas(nome_fazenda), pivo_status(*)');
+  if (error) return res.status(400).json(error);
+  res.json(data);
+});
+
+app.put('/pivos/:id', async (req: Request, res: Response) => {
+  try {
+    const dados = PivoUpdateSchema.parse(req.body);
+    // @ts-ignore
+    const payload = dados.coordenadas ? { ...dados, coordenadas: formatPoint(dados.coordenadas) } : dados;
+    const { data, error } = await supabase.from('pivos').update(payload).eq('id', req.params.id).select().single();
+    if (error) return res.status(400).json(error);
+    res.json(data);
+  } catch (err: any) {
+    res.status(400).json({ error: err.errors });
+  }
+});
+
+app.delete('/pivos/:id', async (req: Request, res: Response) => {
+  const { error } = await supabase.from('pivos').delete().eq('id', req.params.id);
+  if (error) return res.status(400).json(error);
+  res.status(204).send();
+});
+
+// --- INICIALIZAÇÃO ---
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`[BACKEND] Servidor Pluvia operacional na porta ${PORT}`);
+});

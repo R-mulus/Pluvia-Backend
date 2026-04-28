@@ -2,7 +2,7 @@ import { supabase } from './lib/supabase.js';
 
 const CONFIG = {
   INTERVALO_CHECK: 10000,      // 10 segundos
-  DURACAO_SIMULADA_MS: 300000, // 5 minutos (300.000ms)
+  DURACAO_SIMULADA_MS: 300000, // 5 minutos (300000 ms)
 };
 
 async function verificarCronograma() {

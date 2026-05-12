@@ -1,8 +1,3 @@
-/**
- * CAMINHO: src/server.ts
- * NOME: server.ts
- * CORREÇÃO: Uso de tipos corretos e suporte nativo a erros async do Express 5.
- */
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import cors from 'cors';

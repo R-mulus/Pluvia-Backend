@@ -298,5 +298,5 @@ async function iniciarModbus() {
         setTimeout(iniciarModbus, 5000);
     }
 }
-
+//seila
 iniciarModbus();

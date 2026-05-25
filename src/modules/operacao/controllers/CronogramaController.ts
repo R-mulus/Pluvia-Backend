@@ -1,71 +1,73 @@
 import type { Request, Response, NextFunction } from "express";
+import { CronogramaService } from "../services/CronogramaService.js";
 import { CronogramaRepository } from "../repositories/CronogramaRepository.js";
-import { OperacaoService } from "../services/OperacaoService.js";
-import { LogsRepository } from '../repositories/LogsRepository.js';
-import {
-  ComandoCronogramaSchema,
-  ComandoUpdateSchema,
-} from "../schemas/comando.schema.js";
+import { LogsRepository } from "../repositories/LogsRepository.js";
+import { CronogramaSchema } from "../schemas/cronograma.schema.js";
+import type { AuthRequest } from "../../../shared/middlewares/auth.middleware.js";
 
 class CronogramaController {
-  private cronogramaRepository = new CronogramaRepository();
-  private logsRepository = new LogsRepository();
-  private operacaoService = new OperacaoService(this.cronogramaRepository, this.logsRepository);
+  // Instanciando o serviço refatorado
+  private service = new CronogramaService(
+    new CronogramaRepository(),
+    new LogsRepository()
+  );
 
-  listar = async (_req: Request, res: Response, next: NextFunction) => {
+  listar = async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const cronogramas = await this.operacaoService.listar();
+      const { pivo_id } = req.query;
+      const cronogramas = await this.service.listarPorPivo(pivo_id as string);
       res.json(cronogramas);
-    } catch (error) {
-      next(error);
-    }
+    } catch (error) { next(error); }
   };
 
   agendar = async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const dadosValidados = ComandoCronogramaSchema.parse(req.body);
-      const novoAgendamento =
-        await this.operacaoService.agendar(dadosValidados);
+      const authReq = req as AuthRequest;
+      const criado_por = authReq.user?.id;
+      if (!criado_por) throw new Error("Usuário não autenticado");
 
-      res.status(201).json({
-        mensagem: "Comando agendado com sucesso!",
-        dados: novoAgendamento,
-      });
-    } catch (error) {
-      next(error);
-    }
-  };
-
-  editar = async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      // Correção: Validação inserida antes de trafegar os dados para a camada de serviço
-      const dadosValidados = ComandoUpdateSchema.parse(req.body);
-      const agendamentoAtualizado = await this.operacaoService.atualizar(
-        req.params.id as string,
-        dadosValidados,
-      );
-
-      res.json({
-        mensagem: "Agendamento atualizado com sucesso!",
-        dados: agendamentoAtualizado,
-      });
-    } catch (error) {
-      next(error);
-    }
+      const dadosValidados = CronogramaSchema.parse(req.body);
+      
+      const novoAgendamento = await this.service.agendar({ ...dadosValidados, criado_por });
+      res.status(201).json({ mensagem: "Cronograma agendado!", dados: novoAgendamento });
+    } catch (error) { next(error); }
   };
 
   deletar = async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await this.operacaoService.deletar(req.params.id as string);
-
-      // Correção: Transição de status 204 para 200 para permitir payload textual
-      res.status(200).json({
-        mensagem: "Agendamento excluído com sucesso!",
-      });
-    } catch (error) {
-      next(error);
-    }
+      await this.service.deletar(req.params.id as string);
+      res.status(200).json({ mensagem: "Agendamento excluído com sucesso!" });
+    } catch (error) { next(error); }
   };
+
+
+  ativar = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { id } = req.params;
+      const { pivo_id } = req.body; // Precisamos do pivo_id para desativar os outros
+
+      if (!pivo_id) throw new Error("ID do pivô é obrigatório");
+
+      const ativado = await this.service.ativar(id as string, pivo_id);
+      res.status(200).json({ mensagem: "Cronograma ativado com sucesso!", dados: ativado });
+    } catch (error) { next(error); }
+  };
+
+  controlar = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { id } = req.params;
+      const { acao } = req.body; // 'iniciar', 'pausar', 'continuar'
+
+      if (!['iniciar', 'pausar', 'continuar'].includes(acao)) {
+        throw new Error("Ação inválida");
+      }
+
+      const atualizado = await this.service.controlar(id as string, acao as any);
+      res.status(200).json({ mensagem: `Comando de ${acao} recebido com sucesso!`, dados: atualizado });
+    } catch (error) { next(error); }
+  };
+
+  
 }
 
 export const cronogramaController = new CronogramaController();

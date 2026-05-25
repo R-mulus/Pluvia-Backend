@@ -1,7 +1,8 @@
 import { supabase } from '../../../config/supabase.js';
 
 export interface InsertEventLogDTO {
-  cronograma_id?: string | null;
+  // Ajustado para refletir a nova coluna do banco de dados
+  cronograma_passo_id?: string | null;
   pivo_id: string;
   operador_id: string;
   tipo_evento: 'ACIONAMENTO_MANUAL' | 'AGENDAMENTO' | 'EDICAO' | 'EXCLUSAO' | 'FALHA';
@@ -13,7 +14,8 @@ export class LogsRepository {
   async listEventLogs(pivoId: string, limit: number) {
     return await supabase
       .from('event_logs')
-      .select('*, usuarios(nome), cronograma(comando)')
+      // Ajustado: Busca o nome do passo (já que o comando JSON não existe mais)
+      .select('*, usuarios(nome), cronograma_passos(nome, lamina, angulo_inicial, angulo_final)')
       .eq('pivo_id', pivoId)
       .order('timestamp', { ascending: false })
       .limit(limit);

@@ -69,14 +69,22 @@ export class CronogramaService {
   async controlar(id: string, acao: 'iniciar' | 'pausar' | 'continuar') {
     try {
       let novoStatus = 'aguardando';
+      let statusPasso = 'aguardando';
       
       if (acao === 'iniciar' || acao === 'continuar') {
         novoStatus = 'executando';
+        statusPasso = 'executando';
       } else if (acao === 'pausar') {
         novoStatus = 'interrompido';
+        statusPasso = 'interrompido';
       }
 
-      return await this.cronogramaRepository.controlar(id, novoStatus);
+      const atualizado = await this.cronogramaRepository.controlar(id, novoStatus);
+      
+      // Atualiza a "esteira" forçando o primeiro passo a reagir ao botão
+      await this.cronogramaRepository.atualizarStatusPrimeiroPasso(id, statusPasso);
+
+      return atualizado;
     } catch (error: any) {
       throw new AppError(error.message);
     }

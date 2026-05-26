@@ -103,4 +103,21 @@ export class CronogramaRepository {
     if (error) throw new Error(error.message);
     return data;
   }
+
+  async atualizarStatusPrimeiroPasso(cronogramaId: string, status: string) {
+    // Pega o ID do passo de ordem 1
+    const { data: passo } = await supabase
+      .from('cronograma_passos')
+      .select('id')
+      .eq('cronograma_id', cronogramaId)
+      .eq('ordem', 1)
+      .single();
+
+    if (passo) {
+      await supabase
+        .from('cronograma_passos')
+        .update({ status_passo: status })
+        .eq('id', passo.id);
+    }
+  }
 }

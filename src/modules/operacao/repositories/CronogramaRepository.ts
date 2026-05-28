@@ -3,8 +3,18 @@ import type { CriarCronogramaDTO } from "../schemas/cronograma.schema.js";
 
 export class CronogramaRepository {
   
+  async buscarPorId(id: string) {
+    const { data, error } = await supabase
+      .from('cronogramas')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error) throw new Error(error.message);
+    return data;
+  }
+
   async listarPorPivo(pivo_id: string) {
-    // Busca a pasta (cronograma) e os papeis dentro dela (cronograma_passos)
     const { data, error } = await supabase
       .from('cronogramas')
       .select(`
@@ -24,21 +34,19 @@ export class CronogramaRepository {
   }
 
   async criarComPassos(dados: CriarCronogramaDTO) {
-    // 1. Cria o Agrupador (cronogramas) agora com horario_inicio
     const { data: cronograma, error: errorCrono } = await supabase
       .from('cronogramas')
       .insert([{ 
         pivo_id: dados.pivo_id, 
         criado_por: dados.criado_por, 
         nome: dados.nome,
-        horario_inicio: dados.horario_inicio // <- ADICIONADO
+        horario_inicio: dados.horario_inicio
       }])
       .select()
       .single();
 
     if (errorCrono) throw new Error(errorCrono.message);
 
-    // 2. Prepara os passos para inserir em lote, agora incluindo a ordem de execução
     const passosFormatados = dados.passos.map(passo => ({
       cronograma_id: cronograma.id,
       pivo_id: dados.pivo_id,
@@ -49,10 +57,11 @@ export class CronogramaRepository {
       lamina: passo.lamina,
       irrigacao: passo.irrigacao,
       direcao: passo.direcao,
-      ordem: passo.ordem // <- ADICIONADO
+      ordem: passo.ordem
+      // Nota: se o Arduino precisar de "horario" fixo na criação, o frontend teria que mandar. 
+      // Mas a nossa gambiarra no Iniciar já vai cobrir isso!
     }));
 
-    // 3. Insere os passos (cronograma_passos)
     const { data: passos, error: errorPassos } = await supabase
       .from('cronograma_passos')
       .insert(passosFormatados)
@@ -67,20 +76,24 @@ export class CronogramaRepository {
   }
 
   async deletar(id: string) {
-    // Como usamos ON DELETE CASCADE no SQL, deletar a pasta apaga os passos junto
+    // 1. Apaga os logs de eventos associados a este cronograma para liberar a Foreign Key
+    await supabase.from("event_logs").delete().eq("cronograma_id", id);
+    
+    // 2. Apaga os passos do cronograma para liberar a Foreign Key
+    await supabase.from("cronograma_passos").delete().eq("cronograma_id", id);
+
+    // 3. Finalmente apaga o cronograma
     const { error } = await supabase.from("cronogramas").delete().eq("id", id);
     if (error) throw new Error(error.message);
     return true;
   }
 
   async ativar(id: string, pivo_id: string) {
-    // Passo 1: Desativa todos os cronogramas deste pivô
     await supabase
       .from('cronogramas')
       .update({ is_ativo: false })
       .eq('pivo_id', pivo_id);
 
-    // Passo 2: Ativa apenas o cronograma selecionado
     const { data, error } = await supabase
       .from('cronogramas')
       .update({ is_ativo: true })
@@ -104,8 +117,8 @@ export class CronogramaRepository {
     return data;
   }
 
-  async atualizarStatusPrimeiroPasso(cronogramaId: string, status: string) {
-    // Pega o ID do passo de ordem 1
+  // --- A GAMBIARRA OFICIAL DE INTEGRAÇÃO AQUI ---
+  async atualizarStatusPrimeiroPasso(cronogramaId: string, status: string, forcarHorarioAgora: boolean = false) {
     const { data: passo } = await supabase
       .from('cronograma_passos')
       .select('id')
@@ -114,9 +127,16 @@ export class CronogramaRepository {
       .single();
 
     if (passo) {
+      const updatePayload: any = { status_passo: status };
+      
+      // Se for Iniciar ou Continuar, injetamos a hora ATUAL para enganar o relógio do Arduino
+      if (forcarHorarioAgora) {
+        updatePayload.horario = new Date().toISOString(); 
+      }
+
       await supabase
         .from('cronograma_passos')
-        .update({ status_passo: status })
+        .update(updatePayload)
         .eq('id', passo.id);
     }
   }

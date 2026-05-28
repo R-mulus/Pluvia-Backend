@@ -1,51 +1,92 @@
 import { CronogramaRepository } from '../repositories/CronogramaRepository.js';
+import { LogsRepository } from '../repositories/LogsRepository.js';
 import { AppError } from '../../../shared/errors/AppError.js';
+import type { CriarCronogramaDTO } from '../schemas/cronograma.schema.js';
 
 export class CronogramaService {
-  private repo = new CronogramaRepository();
-  private statusBloqueados = ['executando', 'concluido', 'falha', 'cancelado', 'interrompido'];
+  constructor(
+    private cronogramaRepository: CronogramaRepository,
+    private logsRepository: LogsRepository
+  ) {}
 
-  async listar() {
-    const { data, error } = await this.repo.list();
-    if (error) throw new AppError(error.message);
-    return data;
-  }
-
-  async agendar(dados: any) {
-    // Aqui poderiam entrar validações de choque de horário no futuro
-    const { data, error } = await this.repo.create({
-      ...dados,
-      status_final: 'aguardando'
-    });
-
-    if (error) throw new AppError(error.message);
-    return data;
-  }
-
-  async editarComando(id: string, dados: any) {
-    const { data: cmd, error: errorBusca } = await this.repo.getById(id);
-    
-    if (errorBusca || !cmd) throw new AppError("Comando não encontrado", 404);
-
-    if (cmd.status_final !== 'aguardando') {
-      throw new AppError(`Edição proibida: Comando está com status '${cmd.status_final}'`);
+  async listarPorPivo(pivoId: string) {
+    try {
+      return await this.cronogramaRepository.listarPorPivo(pivoId);
+    } catch (error: any) {
+      throw new AppError(error.message);
     }
-
-    const { data, error } = await this.repo.update(id, dados);
-    if (error) throw new AppError(error.message);
-    return data;
   }
 
-  async excluirComando(id: string) {
-    const { data: cmd, error: errorBusca } = await this.repo.getById(id);
-    
-    if (errorBusca || !cmd) throw new AppError("Comando não encontrado", 404);
+  async agendar(dados: CriarCronogramaDTO) {
+    try {
+      const novoAgendamento = await this.cronogramaRepository.criarComPassos(dados);
 
-    if (this.statusBloqueados.includes(cmd.status_final)) {
-      throw new AppError(`Exclusão proibida: Comandos em estado '${cmd.status_final}' não podem ser removidos.`);
+      // Auditoria
+      await this.logsRepository.createEventLog({
+        // Removemos o cronograma_id que não existe mais na tipagem
+        pivo_id: dados.pivo_id,
+        operador_id: dados.criado_por,
+        tipo_evento: 'AGENDAMENTO',
+        // Injetamos o ID do agrupador no campo 'codigo' para rastreabilidade textual
+        codigo: `CRONOGRAMA_CRIADO:${novoAgendamento.id}`
+      });
+
+      return novoAgendamento;
+    } catch (error: any) {
+      throw new AppError(error.message);
     }
+  }
 
-    const { error } = await this.repo.delete(id);
-    if (error) throw new AppError(error.message);
+  async deletar(id: string) {
+    try {
+      // Como a tabela log_events tem cronograma_id, deletar aqui pode engatilhar CASCADE 
+      // ou ser bloqueado. O ideal é que o ON DELETE CASCADE cuide disso no banco.
+      await this.cronogramaRepository.deletar(id);
+    } catch (error: any) {
+      throw new AppError(error.message);
+    }
+  }
+
+  async ativar(id: string, pivo_id: string) {
+    try {
+      const ativado = await this.cronogramaRepository.ativar(id, pivo_id);
+      
+      // Opcional: Registrar no log que o cronograma foi ativado
+      await this.logsRepository.createEventLog({
+        pivo_id: pivo_id,
+        operador_id: ativado.criado_por,
+        tipo_evento: 'EDICAO',
+        codigo: `CRONOGRAMA_ATIVADO:${id}`
+      });
+
+      return ativado;
+    } catch (error: any) {
+      throw new AppError(error.message);
+    }
+  }
+
+  // Adicione dentro da classe CronogramaService
+  async controlar(id: string, acao: 'iniciar' | 'pausar' | 'continuar') {
+    try {
+      let novoStatus = 'aguardando';
+      let statusPasso = 'aguardando';
+      
+      if (acao === 'iniciar' || acao === 'continuar') {
+        novoStatus = 'executando';
+        statusPasso = 'executando';
+      } else if (acao === 'pausar') {
+        novoStatus = 'interrompido';
+        statusPasso = 'interrompido';
+      }
+
+      const atualizado = await this.cronogramaRepository.controlar(id, novoStatus);
+      
+      // Atualiza a "esteira" forçando o primeiro passo a reagir ao botão
+      await this.cronogramaRepository.atualizarStatusPrimeiroPasso(id, statusPasso);
+
+      return atualizado;
+    } catch (error: any) {
+      throw new AppError(error.message);
+    }
   }
 }

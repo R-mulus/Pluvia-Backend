@@ -3,7 +3,7 @@ import type { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 
-import router from './routes/api.routes.js';
+import { apiRoutes as router } from './routes/api.routes.js';
 import { AppError } from './shared/errors/AppError.js';
 
 const app = express();

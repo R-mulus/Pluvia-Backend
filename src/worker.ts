@@ -2,128 +2,317 @@ import 'dotenv/config';
 import { supabase } from './config/supabase.js';
 import ModbusRTU from 'modbus-serial';
 
-const client = new (ModbusRTU as any)();
+import { registrarEvento } from './services/eventLogger.js';
+import { registrarConexao } from './services/connectLogger.js';
+import { EVENT_CODES } from './logs/eventCodes.js';
 
-// --- MAPA DE MEMÓRIA MODBUS (DELTA) ---
+// --- CONFIGURAÇÕES E CONSTANTES ---
 const PLC_CONFIG = { host: "127.0.0.1", port: 10003 };
 const STATION_ID = 1;
 
-// Bobinas (Coils - bits)
-const COIL_START = 0;      // M0: Gatilho principal de arranque
-const COIL_BOMBA = 1;      // M1: 1=Água Ligada, 0=Seco
-const COIL_DIRECAO = 2;    // M2: 0=Horário, 1=Anti-Horário
-const COIL_DONE = 10;      // M10: Feedback do CLP (Fim de Ciclo)
+const COIL_START = 0;      
+const COIL_BOMBA = 1;      
+const COIL_DIRECAO = 2;    
+const COIL_DONE = 10;      
 
-// Registos (Holding Registers - 16 bits)
-const REG_ANG_INI = 100;   // D100: Ângulo de Início
-const REG_ANG_FIM = 102;   // D102: Ângulo Final
-const REG_VELOCIDADE = 104;// D104: Percentímetro (Velocidade)
-const REG_ANG_ATUAL = 200; // D200: Falso Encoder (Ângulo em tempo real)
+const REG_ANG_INI = 100;   
+const REG_ANG_FIM = 102;   
+const REG_VELOCIDADE = 104;
 
-async function garantirConexao() {
-    if (!client.isOpen) {
-        try {
-            await client.connectTCP(PLC_CONFIG.host, { port: PLC_CONFIG.port });
-            client.setID(STATION_ID);
-            console.log("======================================");
-            console.log("   [MODBUS] Conectado ao CLP Delta!   ");
-            console.log("======================================");
-        } catch (err: any) {
-            console.error("[ERROR] Erro ao ligar ao CLP:", err.message);
-        }
+const TIMEOUT_SEGUNDOS = 300; 
+const TEMPO_ESPERA_ENTRE_PASSOS_MS = 5000; 
+const JANELA_PRECISAO_MS = 60000; 
+
+const client = new (ModbusRTU as any)();
+
+// --- SISTEMA DE LOCKS ---
+let workerExecutando = false;
+const pivosEmExecucao = new Set<string>();
+const cronogramasEmProcessamento = new Set<string>(); 
+let modbusFila: (() => void)[] = [];
+let modbusOcupado = false;
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// ============================================================================
+// WRAPPERS MODBUS COM TELEMETRIA AUTOMÁTICA (LATÊNCIA E CONEXÃO)
+// ============================================================================
+async function modbusWriteCoil(pivoId: string, address: number, value: boolean) {
+    const start = Date.now();
+    try {
+        await client.writeCoil(address, value);
+        await registrarConexao({ pivoId, latenciaMs: Date.now() - start, statusConexao: true });
+    } catch (e: any) {
+        await registrarConexao({ pivoId, latenciaMs: Date.now() - start, statusConexao: false });
+        await registrarEvento({ pivoId, tipoEvento: 'erro', codigo: EVENT_CODES.ERRO_MODBUS });
+        throw e;
     }
 }
 
-async function startWorker() {
-    console.log("[WORKER] Worker Pluvia iniciado (Modo Edge). A monitorizar o cronograma...");
-    
-    setInterval(async () => {
-        const agora = new Date();
-        const horaLog = agora.toLocaleTimeString('pt-PT');
-        const horaAtual = `${agora.getHours().toString().padStart(2, '0')}:${agora.getMinutes().toString().padStart(2, '0')}`;
+async function modbusWriteRegister(pivoId: string, address: number, value: number) {
+    const start = Date.now();
+    try {
+        await client.writeRegister(address, value);
+        await registrarConexao({ pivoId, latenciaMs: Date.now() - start, statusConexao: true });
+    } catch (e: any) {
+        await registrarConexao({ pivoId, latenciaMs: Date.now() - start, statusConexao: false });
+        await registrarEvento({ pivoId, tipoEvento: 'erro', codigo: EVENT_CODES.ERRO_MODBUS });
+        throw e;
+    }
+}
 
-        process.stdout.write(`\r[${horaLog}] A verificar agendamentos no Supabase...`);
+async function modbusReadCoils(pivoId: string, address: number, length: number) {
+    const start = Date.now();
+    try {
+        const feedback = await client.readCoils(address, length);
+        await registrarConexao({ pivoId, latenciaMs: Date.now() - start, statusConexao: true });
+        return feedback;
+    } catch (e: any) {
+        await registrarConexao({ pivoId, latenciaMs: Date.now() - start, statusConexao: false });
+        await registrarEvento({ pivoId, tipoEvento: 'erro', codigo: EVENT_CODES.ERRO_MODBUS });
+        throw e;
+    }
+}
 
-        try {
-            await garantirConexao();
-
-            const { data: tarefas, error } = await supabase
-                .from('cronograma')
-                .select('*')
-                .eq('status_final', 'aguardando');
-
-            if (error) return console.error("\n[ERROR] Erro no Supabase:", error.message);
-            if (!tarefas || tarefas.length === 0) return;
-
-            for (const tarefa of tarefas) {
-                const match = (tarefa.horario || "").match(/(\d{2}:\d{2})/);
-                const hBanco = match ? match[1] : "";
-
-                if (hBanco === horaAtual) {
-                    console.log(`\n\n[STATUS] HORÁRIO ATINGIDO (${horaAtual})! A iniciar Tarefa ID: ${tarefa.id}`);
-
-                    // 1. Bloqueia a tarefa para evitar duplicação
-                    await supabase.from('cronograma').update({ status_final: 'executando' }).eq('id', tarefa.id);
-
-                    const cmd = typeof tarefa.comando === 'string' ? JSON.parse(tarefa.comando) : tarefa.comando;
-
-                    if (client.isOpen) {
-                        console.log("[MODBUS] A injetar parâmetros na memória do CLP...");
-                        
-                        // 2. Escreve os parâmetros na memória (Setup Físico)
-                        await client.writeCoil(COIL_BOMBA, cmd.irrigacao === true);
-                        await client.writeCoil(COIL_DIRECAO, cmd.direcao === 'ANTI_HORARIO');
-                        await client.writeRegister(REG_ANG_INI, cmd.angulo_inicial);
-                        await client.writeRegister(REG_ANG_FIM, cmd.angulo_final);
-                        await client.writeRegister(REG_VELOCIDADE, cmd.percentimetro);
-                        
-                        // NOVIDADE: Iguala o D200 ao D100 para o CLP saber de onde começar a contar!
-                        await client.writeRegister(REG_ANG_ATUAL, cmd.angulo_inicial);
-
-                        console.log(`Dados Injetados: Água=${cmd.irrigacao}, Dir=${cmd.direcao}, Vel=${cmd.percentimetro}%`);
-                        console.log(`Rota: ângulo ${cmd.angulo_inicial}° até ângulo ${cmd.angulo_final}°`);
-
-                        // 3. Dispara o M0 (Gatilho de Ação)
-                        await client.writeCoil(COIL_START, true);
-                        console.log("[MODBUS] Gatilho M0 ativado! O CLP assumiu a matemática do percurso.");
-
-                        // 4. Monitoriza o feedback M10 do CLP
-                        let segundosPassados = 0;
-                        const monitor = setInterval(async () => {
-                            try {
-                                const res = await client.readCoils(COIL_DONE, 1);
-                                segundosPassados++;
-
-                                if (res.data[0] === true) {
-                                    console.log(`\n[MODBUS] Feedback M10 recebido! O CLP terminou a operação.`);
-                                    
-                                    // Atualiza na base de dados
-                                    await supabase.from('cronograma').update({ status_final: 'concluido' }).eq('id', tarefa.id);
-                                    
-                                    // Limpa o CLP para o próximo ciclo
-                                    await client.writeCoil(COIL_START, false);
-                                    await client.writeCoil(COIL_DONE, false); 
-                                    console.log(`[MODBUS] Memórias de controlo limpas.`);
-                                    
-                                    clearInterval(monitor);
-                                }
-
-                                if (segundosPassados > 300) {
-                                    console.warn("\n[TIMEOUT] O CLP demorou muito a responder. A abortar monitorização.");
-                                    await supabase.from('cronograma').update({ status_final: 'falha' }).eq('id', tarefa.id);
-                                    clearInterval(monitor);
-                                }
-                            } catch (e) {
-                                // Ignora erros de leitura de rede temporários
-                            }
-                        }, 1000);
+// ============================================================================
+// MUTEX MODBUS - SERIALIZAÇÃO TOTAL DA COMUNICAÇÃO
+// ============================================================================
+async function withModbusLock<T>(pivoId: string, action: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+        const task = async () => {
+            modbusOcupado = true;
+            try {
+                if (!client.isOpen) {
+                    const startConnect = Date.now();
+                    try {
+                        await client.connectTCP(PLC_CONFIG.host, { port: PLC_CONFIG.port });
+                        client.setID(STATION_ID);
+                        await registrarConexao({ pivoId, latenciaMs: Date.now() - startConnect, statusConexao: true });
+                        await registrarEvento({ pivoId, tipoEvento: 'alerta', codigo: EVENT_CODES.MODBUS_CONECTADO });
+                    } catch (err: any) {
+                        await registrarConexao({ pivoId, latenciaMs: Date.now() - startConnect, statusConexao: false });
+                        throw err;
                     }
                 }
+                const result = await action();
+                resolve(result);
+            } catch (err) {
+                reject(err);
+            } finally {
+                modbusOcupado = false;
+                if (modbusFila.length > 0) {
+                    const nextTask = modbusFila.shift();
+                    if (nextTask) nextTask();
+                }
             }
-        } catch (err: any) {
-            console.error("\n[ERROR] Erro no Worker:", err.message);
+        };
+
+        if (modbusOcupado) {
+            modbusFila.push(task);
+        } else {
+            task();
         }
-    }, 10000); 
+    });
+}
+
+// ============================================================================
+// FUNÇÕES DE LIMPEZA
+// ============================================================================
+async function limparModbus(pivoId: string) {
+    console.log("🧹 [LIMPANDO MODBUS] Zerando registradores e coils...");
+    try {
+        await modbusWriteRegister(pivoId, REG_ANG_INI, 0);
+        await modbusWriteRegister(pivoId, REG_ANG_FIM, 0);
+        await modbusWriteRegister(pivoId, REG_VELOCIDADE, 0);
+        
+        await modbusWriteCoil(pivoId, COIL_DIRECAO, false);
+        await modbusWriteCoil(pivoId, COIL_BOMBA, false);
+        await modbusWriteCoil(pivoId, COIL_START, false);
+        await modbusWriteCoil(pivoId, COIL_DONE, false);
+        console.log("✅ [MODBUS LIMPO]");
+    } catch (error: any) {
+        console.error("❌ [ERRO LIMPEZA MODBUS] Falha ao tentar limpar a memória do CLP:", error.message);
+    }
+}
+
+// ============================================================================
+// EXECUÇÃO DO PASSO INDIVIDUAL
+// ============================================================================
+async function executarPasso(passo: any): Promise<void> {
+    const pivoId = passo.pivo_id;
+    const cronogramaId = passo.cronograma_id;
+
+    await withModbusLock(pivoId, async () => {
+        try {
+            console.log(`\n🚀 [INICIANDO PASSO] Ordem: ${passo.ordem} | ID: ${passo.id}`);
+            
+            await supabase.from('cronograma_passos').update({ status_passo: 'executando' }).eq('id', passo.id);
+            await registrarEvento({ cronogramaId, cronogramaPassoId: passo.id, pivoId, tipoEvento: 'comando', codigo: EVENT_CODES.ETAPA_INICIADO });
+
+            const velocidadeCalc = 50; 
+            const direcaoModbus = passo.direcao === 'HORARIO' ? false : true;
+            const bombaModbus = passo.irrigacao;
+
+            await modbusWriteCoil(pivoId, COIL_START, false);
+            await modbusWriteCoil(pivoId, COIL_DONE, false);
+            await sleep(200);
+
+            console.log(`[WORKER] Enviando parâmetros ao CLP...`);
+            await modbusWriteRegister(pivoId, REG_ANG_INI, passo.angulo_inicial);
+            await modbusWriteRegister(pivoId, REG_ANG_FIM, passo.angulo_final);
+            await modbusWriteRegister(pivoId, REG_VELOCIDADE, velocidadeCalc);
+            
+            await modbusWriteCoil(pivoId, COIL_DIRECAO, direcaoModbus);
+            await modbusWriteCoil(pivoId, COIL_BOMBA, bombaModbus);
+            
+            await modbusWriteCoil(pivoId, COIL_START, true);
+            await registrarEvento({ cronogramaId, cronogramaPassoId: passo.id, pivoId, tipoEvento: 'comando', codigo: EVENT_CODES.EXEC_INICIADA });
+            await sleep(250);
+
+            console.log(`[MONITORAMENTO INICIADO] Passo ID: ${passo.id}`);
+            const startTime = Date.now();
+            let stepConcluido = false;
+
+            while (true) {
+                const segundosPassados = Math.floor((Date.now() - startTime) / 1000);
+
+                if (segundosPassados > TIMEOUT_SEGUNDOS) {
+                    await registrarEvento({ cronogramaId, cronogramaPassoId: passo.id, pivoId, tipoEvento: 'erro', codigo: EVENT_CODES.CLP_TIMEOUT });
+                    throw new Error("TIMEOUT_EXECUCAO");
+                }
+
+                const feedbackDone = await modbusReadCoils(pivoId, COIL_DONE, 1);
+                const feedbackStart = await modbusReadCoils(pivoId, COIL_START, 1);
+                
+                if (feedbackDone.data[0] === true || feedbackStart.data[0] === false) {
+                    await registrarEvento({ cronogramaId, cronogramaPassoId: passo.id, pivoId, tipoEvento: 'conclusao', codigo: EVENT_CODES.EXEC_FINALIZADA });
+                    stepConcluido = true;
+                    break;
+                }
+
+                await sleep(150); 
+            }
+
+            if (stepConcluido) {
+                await supabase.from('cronograma_passos').update({ status_passo: 'concluido' }).eq('id', passo.id);
+                await registrarEvento({ cronogramaId, cronogramaPassoId: passo.id, pivoId, tipoEvento: 'conclusao', codigo: EVENT_CODES.ETAPA_FINALIZADO });
+            }
+
+        } catch (error: any) {
+            await supabase.from('cronograma_passos').update({ status_passo: 'falha' }).eq('id', passo.id);
+            await registrarEvento({ cronogramaId, cronogramaPassoId: passo.id, pivoId, tipoEvento: 'erro', codigo: EVENT_CODES.ETAPA_FALHA });
+            throw error;
+        } finally {
+            await limparModbus(pivoId);
+        }
+    });
+}
+
+// ============================================================================
+// PROCESSAMENTO DO CRONOGRAMA COMPLETO
+// ============================================================================
+async function processarCronograma(cronograma: any) {
+    if (pivosEmExecucao.has(cronograma.pivo_id)) return;
+    pivosEmExecucao.add(cronograma.pivo_id);
+
+    try {
+        console.log(`\n📅 [CRONOGRAMA INICIADO AGORA] ID: ${cronograma.id}`);
+        await supabase.from('cronogramas').update({ status_final: 'executando' }).eq('id', cronograma.id);
+        await registrarEvento({ cronogramaId: cronograma.id, pivoId: cronograma.pivo_id, tipoEvento: 'comando', codigo: EVENT_CODES.CRONOGRAMA_INICIADO });
+
+        const { data: passos, error: errorPassos } = await supabase
+            .from('cronograma_passos')
+            .select('*')
+            .eq('cronograma_id', cronograma.id)
+            .order('ordem', { ascending: true });
+
+        if (errorPassos || !passos || passos.length === 0) throw new Error("Nenhum passo encontrado.");
+
+        for (let i = 0; i < passos.length; i++) {
+            await executarPasso(passos[i]);
+
+            if (i < passos.length - 1) {
+                await sleep(TEMPO_ESPERA_ENTRE_PASSOS_MS);
+            }
+        }
+
+        console.log(`\n🎉 [CRONOGRAMA CONCLUÍDO]`);
+        await supabase.from('cronogramas').update({ status_final: 'concluido', is_ativo: false }).eq('id', cronograma.id);
+        await registrarEvento({ cronogramaId: cronograma.id, pivoId: cronograma.pivo_id, tipoEvento: 'conclusao', codigo: EVENT_CODES.CRONOGRAMA_FINALIZADO });
+
+    } catch (error: any) {
+        console.error(`\n🚨 [ERRO CRÍTICO NO CRONOGRAMA] O cronograma ${cronograma.id} foi interrompido.`);
+        
+        await supabase.from('cronogramas').update({ status_final: 'falha', is_ativo: false }).eq('id', cronograma.id);
+        await registrarEvento({ cronogramaId: cronograma.id, pivoId: cronograma.pivo_id, tipoEvento: 'erro', codigo: EVENT_CODES.CRONOGRAMA_FALHA });
+        await registrarEvento({ cronogramaId: cronograma.id, pivoId: cronograma.pivo_id, tipoEvento: 'pausa_automatica', codigo: EVENT_CODES.PARADA_AUTOMATICA });
+    } finally {
+        pivosEmExecucao.delete(cronograma.pivo_id);
+    }
+}
+
+// ============================================================================
+// LOOP PRINCIPAL DO WORKER
+// ============================================================================
+async function buscarCronogramasAtivos() {
+    const { data: cronogramas, error } = await supabase
+        .from('cronogramas')
+        .select('*')
+        .eq('status_final', 'aguardando')
+        .eq('is_ativo', true);
+
+    if (error) return [];
+    return cronogramas;
+}
+
+async function startWorker() {
+    console.log("🚀 Worker de Auditoria Iniciado...");
+    
+    await supabase.from('cronogramas').update({ status_final: 'falha', is_ativo: false }).eq('status_final', 'executando');
+    await supabase.from('cronograma_passos').update({ status_passo: 'falha' }).eq('status_passo', 'executando');
+    
+    while (true) {
+        if (!workerExecutando) {
+            workerExecutando = true;
+            
+            try {
+                const pendentes = await buscarCronogramasAtivos();
+                const agora = Date.now();
+                
+                for (const cronograma of pendentes) {
+                    if (cronogramasEmProcessamento.has(cronograma.id)) continue;
+
+                    let dataString = cronograma.horario_inicio;
+                    const dataLimpa = dataString.replace(' ', 'T').substring(0, 19); 
+                    const dataAgendada = new Date(dataLimpa);
+                    const horarioAgendado = dataAgendada.getTime();
+                    
+                    if (isNaN(horarioAgendado)) continue;
+
+                    const tempoRestante = horarioAgendado - agora;
+
+                    if (tempoRestante <= 0) {
+                        cronogramasEmProcessamento.add(cronograma.id);
+                        await registrarEvento({ cronogramaId: cronograma.id, pivoId: cronograma.pivo_id, tipoEvento: 'alerta', codigo: EVENT_CODES.CRONOGRAMA_AGENDADO });
+                        processarCronograma(cronograma).finally(() => cronogramasEmProcessamento.delete(cronograma.id));
+                    } else if (tempoRestante <= JANELA_PRECISAO_MS) {
+                        cronogramasEmProcessamento.add(cronograma.id);
+                        await registrarEvento({ cronogramaId: cronograma.id, pivoId: cronograma.pivo_id, tipoEvento: 'alerta', codigo: EVENT_CODES.CRONOGRAMA_AGENDADO });
+                        
+                        setTimeout(() => {
+                            processarCronograma(cronograma).finally(() => cronogramasEmProcessamento.delete(cronograma.id));
+                        }, tempoRestante);
+                    }
+                }
+            } catch (err: any) {
+                await registrarEvento({ tipoEvento: 'erro', codigo: EVENT_CODES.ERRO_WORKER });
+                console.error("\n[ERROR] Erro geral no ciclo do Worker:", err.message);
+            } finally {
+                workerExecutando = false;
+            }
+        }
+        await sleep(5000); 
+    }
 }
 
 startWorker();

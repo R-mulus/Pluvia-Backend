@@ -19,10 +19,10 @@ let sistemaOcupado = false;
 // CONSTANTES IMPORTANTES
 
 const DIR_AUMENTA = 0;
-const TAXA_DIR_AUMENTA = 12.0;  
+const TAXA_DIR_AUMENTA = 11.8;  
 
 const DIR_DIMINUI = 1;
-const TAXA_DIR_DIMINUI = 6.2; 
+const TAXA_DIR_DIMINUI = 6.3; 
 
 const VELOCIDADE_MOTOR = 20;
 

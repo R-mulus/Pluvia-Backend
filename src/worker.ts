@@ -21,285 +21,309 @@ const REG_VELOCIDADE = 104;
 
 const TIMEOUT_SEGUNDOS = 300; 
 const TEMPO_ESPERA_ENTRE_PASSOS_MS = 5000; 
-const JANELA_PRECISAO_MS = 60000; 
+const JANELA_PRECISAO_MS = 60000; // Janela de 1 minuto
 
 const client = new (ModbusRTU as any)();
 
-// --- SISTEMA DE LOCKS ---
+// --- SISTEMA DE LOCKS E ESTADOS ---
 let workerExecutando = false;
+let sistemaOciosoConfirmado = false; 
 const pivosEmExecucao = new Set<string>();
 const cronogramasEmProcessamento = new Set<string>(); 
-let modbusFila: (() => void)[] = [];
-let modbusOcupado = false;
 
+// NOVO: Set exclusivo para logs detalhados sem poluir o terminal a cada 5 segundos
+const cronogramasDiagnosticados = new Set<string>(); 
+let modbusConectado = false;
+
+// --- UTILITÁRIOS ---
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// ============================================================================
-// WRAPPERS MODBUS COM TELEMETRIA AUTOMÁTICA (LATÊNCIA E CONEXÃO)
-// ============================================================================
-async function modbusWriteCoil(pivoId: string, address: number, value: boolean) {
-    const start = Date.now();
+// --- CONEXÃO MODBUS ---
+async function conectarModbus() {
+    if (modbusConectado) return true;
+    
+    // Captura o tempo antes de tentar a conexão
+    const tempoInicio = Date.now();
+    
     try {
-        await client.writeCoil(address, value);
-        await registrarConexao({ pivoId, latenciaMs: Date.now() - start, statusConexao: true });
-    } catch (e: any) {
-        await registrarConexao({ pivoId, latenciaMs: Date.now() - start, statusConexao: false });
-        await registrarEvento({ pivoId, tipoEvento: 'erro', codigo: EVENT_CODES.ERRO_MODBUS });
-        throw e;
+        await client.connectTCP(PLC_CONFIG.host, { port: PLC_CONFIG.port });
+        client.setID(STATION_ID);
+        client.setTimeout(2000);
+        modbusConectado = true;
+        
+        // Calcula quanto tempo demorou para o CLP responder
+        const latenciaCalculada = Date.now() - tempoInicio;
+        
+        console.log(`[\x1b[32mMODBUS\x1b[0m] Conectado ao CLP/COMMGR em ${PLC_CONFIG.host}:${PLC_CONFIG.port} (Latência: ${latenciaCalculada}ms)`);
+        
+        // Envia statusConexao E latenciaMs
+        await registrarConexao({ statusConexao: true, latenciaMs: latenciaCalculada });
+        
+        return true;
+    } catch (error) {
+        console.error(`[\x1b[31mERRO\x1b[0m] Falha ao conectar no Modbus:`, error);
+        modbusConectado = false;
+        
+        await registrarConexao({ statusConexao: false, latenciaMs: 0 });
+        
+        return false;
     }
 }
 
-async function modbusWriteRegister(pivoId: string, address: number, value: number) {
-    const start = Date.now();
+// --- FUNÇÕES MODBUS WRAPPERS ---
+async function modbusWriteCoil(pivoId: string, address: number, state: boolean): Promise<boolean> {
+    if (!await conectarModbus()) return false;
+    try {
+        await client.writeCoil(address, state);
+        await sleep(50); 
+        return true;
+    } catch (e) {
+        console.error(`[MODBUS ERROR] Falha ao escrever Coil ${address}:`, e);
+        return false;
+    }
+}
+
+async function modbusWriteRegister(pivoId: string, address: number, value: number): Promise<boolean> {
+    if (!await conectarModbus()) return false;
     try {
         await client.writeRegister(address, value);
-        await registrarConexao({ pivoId, latenciaMs: Date.now() - start, statusConexao: true });
-    } catch (e: any) {
-        await registrarConexao({ pivoId, latenciaMs: Date.now() - start, statusConexao: false });
-        await registrarEvento({ pivoId, tipoEvento: 'erro', codigo: EVENT_CODES.ERRO_MODBUS });
-        throw e;
+        await sleep(50);
+        return true;
+    } catch (e) {
+        console.error(`[MODBUS ERROR] Falha ao escrever Registro ${address}:`, e);
+        return false;
     }
 }
 
-async function modbusReadCoils(pivoId: string, address: number, length: number) {
-    const start = Date.now();
+async function modbusReadCoils(pivoId: string, address: number, length: number): Promise<boolean[] | null> {
+    if (!await conectarModbus()) return null;
     try {
-        const feedback = await client.readCoils(address, length);
-        await registrarConexao({ pivoId, latenciaMs: Date.now() - start, statusConexao: true });
-        return feedback;
-    } catch (e: any) {
-        await registrarConexao({ pivoId, latenciaMs: Date.now() - start, statusConexao: false });
-        await registrarEvento({ pivoId, tipoEvento: 'erro', codigo: EVENT_CODES.ERRO_MODBUS });
-        throw e;
+        const response = await client.readCoils(address, length);
+        return response.data;
+    } catch (e) {
+        return null;
     }
 }
 
 // ============================================================================
-// MUTEX MODBUS - SERIALIZAÇÃO TOTAL DA COMUNICAÇÃO
+// LÓGICA DE LIMPEZA PRECISA E MINIMALISTA
 // ============================================================================
-async function withModbusLock<T>(pivoId: string, action: () => Promise<T>): Promise<T> {
-    return new Promise((resolve, reject) => {
-        const task = async () => {
-            modbusOcupado = true;
-            try {
-                if (!client.isOpen) {
-                    const startConnect = Date.now();
-                    try {
-                        await client.connectTCP(PLC_CONFIG.host, { port: PLC_CONFIG.port });
-                        client.setID(STATION_ID);
-                        await registrarConexao({ pivoId, latenciaMs: Date.now() - startConnect, statusConexao: true });
-                        await registrarEvento({ pivoId, tipoEvento: 'alerta', codigo: EVENT_CODES.MODBUS_CONECTADO });
-                    } catch (err: any) {
-                        await registrarConexao({ pivoId, latenciaMs: Date.now() - startConnect, statusConexao: false });
-                        throw err;
-                    }
-                }
-                const result = await action();
-                resolve(result);
-            } catch (err) {
-                reject(err);
-            } finally {
-                modbusOcupado = false;
-                if (modbusFila.length > 0) {
-                    const nextTask = modbusFila.shift();
-                    if (nextTask) nextTask();
-                }
-            }
-        };
-
-        if (modbusOcupado) {
-            modbusFila.push(task);
-        } else {
-            task();
-        }
-    });
-}
-
-// ============================================================================
-// FUNÇÕES DE LIMPEZA
-// ============================================================================
-async function limparModbus(pivoId: string) {
-    console.log("🧹 [LIMPANDO MODBUS] Zerando registradores e coils...");
+async function executarLimpezaProfundaCLP(pivoId: string, contexto: string) {
+    console.log(`\n[\x1b[33mLIMPEZA\x1b[0m] Iniciando limpeza de memória do CLP (${contexto})...`);
     try {
+        if (!await conectarModbus()) return;
+
+        // 1. Zera Registradores
         await modbusWriteRegister(pivoId, REG_ANG_INI, 0);
         await modbusWriteRegister(pivoId, REG_ANG_FIM, 0);
         await modbusWriteRegister(pivoId, REG_VELOCIDADE, 0);
-        
-        await modbusWriteCoil(pivoId, COIL_DIRECAO, false);
-        await modbusWriteCoil(pivoId, COIL_BOMBA, false);
+        console.log(`  └─ [\x1b[32mOK\x1b[0m] Registradores resetados (Ang Incial, Ang Final, Vel).`);
+        await sleep(100);
+
+        // 2. Zera Coils
         await modbusWriteCoil(pivoId, COIL_START, false);
+        await modbusWriteCoil(pivoId, COIL_BOMBA, false);
+        await modbusWriteCoil(pivoId, COIL_DIRECAO, false);
         await modbusWriteCoil(pivoId, COIL_DONE, false);
-        console.log("✅ [MODBUS LIMPO]");
+        console.log(`  └─ [\x1b[32mOK\x1b[0m] Coils limpos (M0, M1, M2, M10 forçados para FALSE).`);
+        
+        await sleep(250); 
+
+        // 3. Validação de Standby e Confirmação de Limpeza
+        const checkCoils = await modbusReadCoils(pivoId, COIL_START, 11);
+        if (checkCoils && checkCoils[COIL_START] === false && checkCoils[COIL_DONE] === false) {
+            console.log(`  └─ [\x1b[32mOK\x1b[0m] Confirmação do reset do coil M10 verificada no CLP.`);
+            console.log(`[\x1b[36mSISTEMA\x1b[0m] Confirmação: Bridge totalmente liberada para novos comandos.\n`);
+        } else {
+            console.log(`  └─ [\x1b[31mAVISO\x1b[0m] Coils não confirmaram zero. Bridge pode apresentar instabilidade.\n`);
+        }
     } catch (error: any) {
-        console.error("❌ [ERRO LIMPEZA MODBUS] Falha ao tentar limpar a memória do CLP:", error.message);
+        console.error(`[\x1b[31mERRO\x1b[0m] Falha durante rotina de limpeza profunda: ${error.message}\n`);
     }
 }
 
-// ============================================================================
-// EXECUÇÃO DO PASSO INDIVIDUAL
-// ============================================================================
-async function executarPasso(passo: any): Promise<void> {
-    const pivoId = passo.pivo_id;
-    const cronogramaId = passo.cronograma_id;
+// --- LÓGICA DE EXECUÇÃO ---
 
-    await withModbusLock(pivoId, async () => {
-        try {
-            console.log(`\n🚀 [INICIANDO PASSO] Ordem: ${passo.ordem} | ID: ${passo.id}`);
-            
-            await supabase.from('cronograma_passos').update({ status_passo: 'executando' }).eq('id', passo.id);
-            await registrarEvento({ cronogramaId, cronogramaPassoId: passo.id, pivoId, tipoEvento: 'comando', codigo: EVENT_CODES.ETAPA_INICIADO });
+async function executarPasso(passo: any, pivoId: string, cronogramaId: string) {
+    console.log(`\n[\x1b[35mEXECUTANDO\x1b[0m] Iniciando Passo ${passo.ordem} do Cronograma ${cronogramaId}`);
+    
+    await modbusWriteCoil(pivoId, COIL_START, false);
+    await modbusWriteCoil(pivoId, COIL_DONE, false);
+    await sleep(200);
 
-            const velocidadeCalc = 50; 
-            const direcaoModbus = passo.direcao === 'HORARIO' ? false : true;
-            const bombaModbus = passo.irrigacao;
+    await modbusWriteRegister(pivoId, REG_ANG_INI, passo.angulo_inicial);
+    await modbusWriteRegister(pivoId, REG_ANG_FIM, passo.angulo_final);
+    await modbusWriteRegister(pivoId, REG_VELOCIDADE, passo.percentimetro);
+    
+    const direcaoBit = (passo.direcao === 'REVERSO') ? true : false;
+    await modbusWriteCoil(pivoId, COIL_DIRECAO, direcaoBit);
+    await modbusWriteCoil(pivoId, COIL_BOMBA, passo.irrigacao);
 
-            await modbusWriteCoil(pivoId, COIL_START, false);
-            await modbusWriteCoil(pivoId, COIL_DONE, false);
-            await sleep(200);
+    await modbusWriteCoil(pivoId, COIL_START, true);
+    console.log(`[\x1b[32mENVIADO\x1b[0m] Parâmetros gravados. Gatilho M0 ativado.`);
 
-            console.log(`[WORKER] Enviando parâmetros ao CLP...`);
-            await modbusWriteRegister(pivoId, REG_ANG_INI, passo.angulo_inicial);
-            await modbusWriteRegister(pivoId, REG_ANG_FIM, passo.angulo_final);
-            await modbusWriteRegister(pivoId, REG_VELOCIDADE, velocidadeCalc);
-            
-            await modbusWriteCoil(pivoId, COIL_DIRECAO, direcaoModbus);
-            await modbusWriteCoil(pivoId, COIL_BOMBA, bombaModbus);
-            
-            await modbusWriteCoil(pivoId, COIL_START, true);
-            await registrarEvento({ cronogramaId, cronogramaPassoId: passo.id, pivoId, tipoEvento: 'comando', codigo: EVENT_CODES.EXEC_INICIADA });
-            await sleep(250);
+    const tempoInicio = Date.now();
+    let passoConcluido = false;
+    
+    // --- PROBLEMA 2: AJUSTES PRECISOS NO POLLING DO M10 ---
+    let ultimoEstadoM10: boolean | null = null;
+    let leituras = 0;
+    console.log(`[\x1b[36mPOLLING\x1b[0m] Início do polling no coil M10. Frequência reajustada: 20ms...`);
 
-            console.log(`[MONITORAMENTO INICIADO] Passo ID: ${passo.id}`);
-            const startTime = Date.now();
-            let stepConcluido = false;
-
-            while (true) {
-                const segundosPassados = Math.floor((Date.now() - startTime) / 1000);
-
-                if (segundosPassados > TIMEOUT_SEGUNDOS) {
-                    await registrarEvento({ cronogramaId, cronogramaPassoId: passo.id, pivoId, tipoEvento: 'erro', codigo: EVENT_CODES.CLP_TIMEOUT });
-                    throw new Error("TIMEOUT_EXECUCAO");
-                }
-
-                const feedbackDone = await modbusReadCoils(pivoId, COIL_DONE, 1);
-                const feedbackStart = await modbusReadCoils(pivoId, COIL_START, 1);
-                
-                if (feedbackDone.data[0] === true || feedbackStart.data[0] === false) {
-                    await registrarEvento({ cronogramaId, cronogramaPassoId: passo.id, pivoId, tipoEvento: 'conclusao', codigo: EVENT_CODES.EXEC_FINALIZADA });
-                    stepConcluido = true;
-                    break;
-                }
-
-                await sleep(150); 
-            }
-
-            if (stepConcluido) {
-                await supabase.from('cronograma_passos').update({ status_passo: 'concluido' }).eq('id', passo.id);
-                await registrarEvento({ cronogramaId, cronogramaPassoId: passo.id, pivoId, tipoEvento: 'conclusao', codigo: EVENT_CODES.ETAPA_FINALIZADO });
-            }
-
-        } catch (error: any) {
-            await supabase.from('cronograma_passos').update({ status_passo: 'falha' }).eq('id', passo.id);
-            await registrarEvento({ cronogramaId, cronogramaPassoId: passo.id, pivoId, tipoEvento: 'erro', codigo: EVENT_CODES.ETAPA_FALHA });
-            throw error;
-        } finally {
-            await limparModbus(pivoId);
+    while (!passoConcluido) {
+        const tempoAtual = Date.now();
+        if ((tempoAtual - tempoInicio) > (TIMEOUT_SEGUNDOS * 1000)) {
+            console.error(`[\x1b[31mTIMEOUT\x1b[0m] Falha no M10! Timeout atingido após ${TIMEOUT_SEGUNDOS}s.`);
+            console.log(`  └─ Total de leituras falhas: ${leituras}`);
+            throw new Error(`Timeout no Passo ${passo.ordem}`);
         }
-    });
+
+        const statusDone = await modbusReadCoils(pivoId, COIL_DONE, 1);
+        leituras++;
+
+        if (statusDone !== null) {
+            const estadoAtual = statusDone[0] ?? false;
+
+            if (estadoAtual !== ultimoEstadoM10) {
+                console.log(`  └─ [\x1b[33mMUDANÇA M10\x1b[0m] Valor lido do M10 mudou: ${ultimoEstadoM10} -> ${estadoAtual} (Leitura #${leituras})`);
+                ultimoEstadoM10 = estadoAtual;
+            }
+
+            if (estadoAtual === true) {
+                passoConcluido = true;
+                const tempoGasto = tempoAtual - tempoInicio;
+                console.log(`[\x1b[32mSUCESSO\x1b[0m] Confirmação de conclusão recebida! (Tempo total: ${tempoGasto}ms | Leituras: ${leituras})`);
+                
+                await executarLimpezaProfundaCLP(pivoId, `Pós-Passo ${passo.ordem}`);
+                break;
+            }
+        }
+
+        await sleep(20); 
+    }
 }
 
-// ============================================================================
-// PROCESSAMENTO DO CRONOGRAMA COMPLETO
-// ============================================================================
 async function processarCronograma(cronograma: any) {
-    if (pivosEmExecucao.has(cronograma.pivo_id)) return;
     pivosEmExecucao.add(cronograma.pivo_id);
-
+    console.log(`\n======================================================`);
+    console.log(`[\x1b[36mCRONOGRAMA\x1b[0m] Iniciando Cronograma ID: ${cronograma.id}`);
+    
     try {
-        console.log(`\n📅 [CRONOGRAMA INICIADO AGORA] ID: ${cronograma.id}`);
         await supabase.from('cronogramas').update({ status_final: 'executando' }).eq('id', cronograma.id);
-        await registrarEvento({ cronogramaId: cronograma.id, pivoId: cronograma.pivo_id, tipoEvento: 'comando', codigo: EVENT_CODES.CRONOGRAMA_INICIADO });
 
-        const { data: passos, error: errorPassos } = await supabase
+        const { data: passos, error } = await supabase
             .from('cronograma_passos')
             .select('*')
             .eq('cronograma_id', cronograma.id)
             .order('ordem', { ascending: true });
 
-        if (errorPassos || !passos || passos.length === 0) throw new Error("Nenhum passo encontrado.");
+        if (error || !passos || passos.length === 0) throw new Error("Nenhum passo encontrado");
 
         for (let i = 0; i < passos.length; i++) {
-            await executarPasso(passos[i]);
-
+            await executarPasso(passos[i], cronograma.pivo_id, cronograma.id);
+            
             if (i < passos.length - 1) {
+                console.log(`[\x1b[33mAGUARDANDO\x1b[0m] Pausa entre passos (${TEMPO_ESPERA_ENTRE_PASSOS_MS}ms)...`);
                 await sleep(TEMPO_ESPERA_ENTRE_PASSOS_MS);
             }
         }
 
-        console.log(`\n🎉 [CRONOGRAMA CONCLUÍDO]`);
-        await supabase.from('cronogramas').update({ status_final: 'concluido', is_ativo: false }).eq('id', cronograma.id);
-        await registrarEvento({ cronogramaId: cronograma.id, pivoId: cronograma.pivo_id, tipoEvento: 'conclusao', codigo: EVENT_CODES.CRONOGRAMA_FINALIZADO });
-
-    } catch (error: any) {
-        console.error(`\n🚨 [ERRO CRÍTICO NO CRONOGRAMA] O cronograma ${cronograma.id} foi interrompido.`);
+        await supabase.from('cronogramas').update({ status_final: 'concluido' }).eq('id', cronograma.id);
+        console.log(`[\x1b[32mCONCLUÍDO\x1b[0m] Cronograma ${cronograma.id} finalizado com sucesso!`);
         
-        await supabase.from('cronogramas').update({ status_final: 'falha', is_ativo: false }).eq('id', cronograma.id);
-        await registrarEvento({ cronogramaId: cronograma.id, pivoId: cronograma.pivo_id, tipoEvento: 'erro', codigo: EVENT_CODES.CRONOGRAMA_FALHA });
-        await registrarEvento({ cronogramaId: cronograma.id, pivoId: cronograma.pivo_id, tipoEvento: 'pausa_automatica', codigo: EVENT_CODES.PARADA_AUTOMATICA });
+        await executarLimpezaProfundaCLP(cronograma.pivo_id, "Fim de Cronograma");
+
+    } catch (err: any) {
+        console.error(`[\x1b[31mFALHA\x1b[0m] Erro no Cronograma ${cronograma.id}:`, err.message);
+        await supabase.from('cronogramas').update({ status_final: 'falha' }).eq('id', cronograma.id);
+        await registrarEvento({ tipoEvento: 'erro', codigo: EVENT_CODES.ERRO_WORKER });
+        
+        await executarLimpezaProfundaCLP(cronograma.pivo_id, "Falha/Aborto");
+
     } finally {
         pivosEmExecucao.delete(cronograma.pivo_id);
     }
 }
 
-// ============================================================================
-// LOOP PRINCIPAL DO WORKER
-// ============================================================================
-async function buscarCronogramasAtivos() {
-    const { data: cronogramas, error } = await supabase
-        .from('cronogramas')
-        .select('*')
-        .eq('status_final', 'aguardando')
-        .eq('is_ativo', true);
+// --- LOOP PRINCIPAL ---
 
-    if (error) return [];
-    return cronogramas;
-}
+async function iniciarWorker() {
+    console.log("[\x1b[36mPLUVIA WORKER\x1b[0m] Inicializado. Aguardando cronogramas...");
+    await conectarModbus();
 
-async function startWorker() {
-    console.log("🚀 Worker de Auditoria Iniciado...");
-    
-    await supabase.from('cronogramas').update({ status_final: 'falha', is_ativo: false }).eq('status_final', 'executando');
-    await supabase.from('cronograma_passos').update({ status_passo: 'falha' }).eq('status_passo', 'executando');
-    
     while (true) {
         if (!workerExecutando) {
             workerExecutando = true;
-            
             try {
-                const pendentes = await buscarCronogramasAtivos();
-                const agora = Date.now();
-                
-                for (const cronograma of pendentes) {
-                    if (cronogramasEmProcessamento.has(cronograma.id)) continue;
+                if (cronogramasEmProcessamento.size === 0 && pivosEmExecucao.size === 0) {
+                    if (!sistemaOciosoConfirmado) {
+                        console.log(`\n[\x1b[36mSTANDBY\x1b[0m] Sistema ocioso. Nenhuma tarefa pendente.`);
+                        await executarLimpezaProfundaCLP("N/A", "Preventiva em Idle");
+                        sistemaOciosoConfirmado = true; 
+                    }
+                } else {
+                    sistemaOciosoConfirmado = false; 
+                }
 
-                    let dataString = cronograma.horario_inicio;
-                    const dataLimpa = dataString.replace(' ', 'T').substring(0, 19); 
-                    const dataAgendada = new Date(dataLimpa);
-                    const horarioAgendado = dataAgendada.getTime();
+                // O relógio atual da máquina local em milissegundos
+                const agora = Date.now();
+
+                const { data: cronogramas, error } = await supabase
+                    .from('cronogramas')
+                    .select('*')
+                    .eq('is_ativo', true)
+                    .eq('status_final', 'aguardando');
+
+                if (error) throw error;
+
+                for (const cronograma of cronogramas || []) {
+                    if (cronogramasEmProcessamento.has(cronograma.id)) continue;
+                    if (pivosEmExecucao.has(cronograma.pivo_id)) continue;
+
+                    // --- SOLUÇÃO CIRÚRGICA DE FUSO HORÁRIO ---
+                    // Remove silenciosamente as tags de fuso horário da string ("Z" ou "+00:00")
+                    // Ex: '2026-05-29T16:18:00+00:00' vira '2026-05-29T16:18:00'
+                    // Isso obriga o JS a interpretar o 16:18 como horário local, alinhando com o Date.now().
+                    const dataStringLimpa = cronograma.horario_inicio.replace(/(Z|[+-]\d{2}:\d{2})$/, '');
+                    const horarioAgendado = new Date(dataStringLimpa).getTime();
                     
                     if (isNaN(horarioAgendado)) continue;
 
                     const tempoRestante = horarioAgendado - agora;
 
+                    // Exibe a análise profunda apenas 1x
+                    if (!cronogramasDiagnosticados.has(cronograma.id)) {
+                        console.log(`\n======================================================`);
+                        console.log(`[\x1b[36mANÁLISE DE AGENDAMENTO\x1b[0m] Identificado novo cronograma.`);
+                        console.log(`  └─ ID: ${cronograma.id}`);
+                        console.log(`  └─ Horário Atual (Local da Máquina): ${new Date(agora).toLocaleString()}`);
+                        console.log(`  └─ Horário Banco (Corrigido para Local): ${new Date(horarioAgendado).toLocaleString()}`);
+                        console.log(`  └─ Delay Calculado (Corrigido): ${tempoRestante}ms`);
+                        cronogramasDiagnosticados.add(cronograma.id);
+
+                        if (tempoRestante < 0) {
+                            console.log(`  └─ \x1b[31mAVISO:\x1b[0m Este cronograma está atrasado/expirado. A execução será ativada IMEDIATAMENTE.`);
+                        } else if (tempoRestante > JANELA_PRECISAO_MS) {
+                            console.log(`  └─ \x1b[34mSTATUS:\x1b[0m Cronograma no futuro (> 1 min). O Worker aguardará silenciosamente.`);
+                        }
+                    }
+
                     if (tempoRestante <= 0) {
                         cronogramasEmProcessamento.add(cronograma.id);
                         await registrarEvento({ cronogramaId: cronograma.id, pivoId: cronograma.pivo_id, tipoEvento: 'alerta', codigo: EVENT_CODES.CRONOGRAMA_AGENDADO });
+                        
+                        console.log(`\n[\x1b[32mDISPARO\x1b[0m] Momento de início real atingido. Iniciando ${cronograma.id} AGORA.`);
                         processarCronograma(cronograma).finally(() => cronogramasEmProcessamento.delete(cronograma.id));
+                        
                     } else if (tempoRestante <= JANELA_PRECISAO_MS) {
                         cronogramasEmProcessamento.add(cronograma.id);
                         await registrarEvento({ cronogramaId: cronograma.id, pivoId: cronograma.pivo_id, tipoEvento: 'alerta', codigo: EVENT_CODES.CRONOGRAMA_AGENDADO });
                         
+                        console.log(`\n[\x1b[33mAGENDADO\x1b[0m] Cronograma ${cronograma.id} entrou na janela de precisão (< 1 min).`);
+                        console.log(`  └─ Aguardando exatos ${tempoRestante}ms (delay) para o disparo perfeito.`);
+                        
                         setTimeout(() => {
+                            console.log(`[\x1b[32mDISPARO TIMER\x1b[0m] Timeout concluído. Iniciando cronograma ${cronograma.id}.`);
                             processarCronograma(cronograma).finally(() => cronogramasEmProcessamento.delete(cronograma.id));
                         }, tempoRestante);
                     }
@@ -315,4 +339,5 @@ async function startWorker() {
     }
 }
 
-startWorker();
+// Inicia a aplicação
+iniciarWorker();

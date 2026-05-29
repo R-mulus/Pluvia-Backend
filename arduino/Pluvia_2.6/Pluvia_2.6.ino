@@ -192,7 +192,7 @@ void loop() {
       if (millis() - ultimoPiscaMov >= 250) {
         ultimoPiscaMov = millis();
         estadoPiscaMov = !estadoPiscaMov;
-        setCorRGB(0, 0, estadoPiscaMov ? 255 : 0); // Pisca Azul
+        setCorRGB(0, estadoPiscaMov ? 255 : 0, 0); // Pisca Azul
       }
     } else if (modoAtual == MODO_INIT) {
       if (millis() - ultimoPiscaMov >= 250) {
@@ -362,7 +362,7 @@ void processarComando(char* pacote) {
 
   // AUTO / INIT
   if (strncmp(pacote, "AUTO", 4) == 0 || strncmp(pacote, "INIT", 4) == 0) {
-    piscarRGB(0, 0, 255, 3);
+    piscarRGB(0, 255, 0, 3);
     int ang = 0, vel = 0, dir = 0, agua = 1;
     long tempo = 0;
     

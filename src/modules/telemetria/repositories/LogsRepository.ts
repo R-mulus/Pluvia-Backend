@@ -5,8 +5,7 @@ export interface InsertEventLogDTO {
   cronograma_passo_id?: string | null; 
   pivo_id: string;
   operador_id: string;
-  // Alterado para letras minúsculas para bater com o Enum do banco
-  tipo_evento: 'acionamento_manual' | 'agendamento' | 'edicao' | 'exclusao' | 'falha';
+  tipo_evento: 'comando' | 'sensor' | 'pausa_manual' | 'pausa_automatica' | 'erro' | 'alerta' | 'conclusao';
   codigo?: string | null;
 }
 
@@ -14,10 +13,10 @@ export class LogsRepository {
   async listEventLogs(pivoId: string, limit: number) {
     return await supabase
       .from('event_logs')
+      // A CORREÇÃO: Removemos o "cronogramas(nome)" daqui pois não existe FK no banco
       .select(`
         *, 
         usuarios(nome), 
-        cronogramas(nome),
         cronograma_passos(nome, lamina, angulo_inicial, angulo_final)
       `)
       .eq('pivo_id', pivoId)

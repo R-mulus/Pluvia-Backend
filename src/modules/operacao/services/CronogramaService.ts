@@ -24,9 +24,9 @@ export class CronogramaService {
       await this.logsService.registrarEvento({
         pivo_id: dados.pivo_id,
         operador_id: dados.criado_por,
-        tipo_evento: "agendamento", // Minúsculo
+        tipo_evento: "comando", 
         cronograma_id: novoAgendamento.id,
-        codigo: `CRONOGRAMA_CRIADO`,
+        codigo: `CRONOGRAMA_AGENDADO`, 
       });
 
       return novoAgendamento;
@@ -44,7 +44,7 @@ export class CronogramaService {
       await this.logsService.registrarEvento({
         pivo_id: cronograma.pivo_id,
         operador_id: operador_id,
-        tipo_evento: "exclusao", // Minúsculo
+        tipo_evento: "comando", 
         codigo: `CRONOGRAMA_EXCLUIDO:${cronograma.nome}`,
       });
     } catch (error: any) {
@@ -59,7 +59,7 @@ export class CronogramaService {
       await this.logsService.registrarEvento({
         pivo_id: pivo_id,
         operador_id: operador_id,
-        tipo_evento: "edicao", // Minúsculo
+        tipo_evento: "comando", 
         cronograma_id: id,
         codigo: `CRONOGRAMA_ATIVADO`,
       });
@@ -86,16 +86,19 @@ export class CronogramaService {
       }
 
       const cronograma = await this.cronogramaRepository.buscarPorId(id);
-      const atualizado = await this.cronogramaRepository.controlar(id, novoStatus);
       
-      await this.cronogramaRepository.atualizarStatusPrimeiroPasso(id, statusPasso, forcarHorarioAgora);
+      // AJUSTE AQUI: O forcarHorarioAgora vai pro controlar() onde a coluna horario_inicio existe!
+      const atualizado = await this.cronogramaRepository.controlar(id, novoStatus, forcarHorarioAgora);
+      
+      // AJUSTE AQUI: O passo só muda o status agora.
+      await this.cronogramaRepository.atualizarStatusPrimeiroPasso(id, statusPasso);
 
       await this.logsService.registrarEvento({
         pivo_id: cronograma.pivo_id,
         operador_id: operador_id,
-        tipo_evento: acao === 'pausar' ? 'edicao' : 'acionamento_manual', // Minúsculo
+        tipo_evento: acao === 'pausar' ? 'pausa_manual' : 'comando', 
         cronograma_id: id,
-        codigo: `COMANDO_${acao.toUpperCase()}`,
+        codigo: acao === 'pausar' ? 'PARADA_MANUAL' : (acao === 'iniciar' ? 'CRONOGRAMA_INICIADO' : 'COMANDO_CONTINUAR'), 
       });
 
       return atualizado;

@@ -58,8 +58,6 @@ export class CronogramaRepository {
       irrigacao: passo.irrigacao,
       direcao: passo.direcao,
       ordem: passo.ordem
-      // Nota: se o Arduino precisar de "horario" fixo na criação, o frontend teria que mandar. 
-      // Mas a nossa gambiarra no Iniciar já vai cobrir isso!
     }));
 
     const { data: passos, error: errorPassos } = await supabase
@@ -76,13 +74,9 @@ export class CronogramaRepository {
   }
 
   async deletar(id: string) {
-    // 1. Apaga os logs de eventos associados a este cronograma para liberar a Foreign Key
     await supabase.from("event_logs").delete().eq("cronograma_id", id);
-    
-    // 2. Apaga os passos do cronograma para liberar a Foreign Key
     await supabase.from("cronograma_passos").delete().eq("cronograma_id", id);
 
-    // 3. Finalmente apaga o cronograma
     const { error } = await supabase.from("cronogramas").delete().eq("id", id);
     if (error) throw new Error(error.message);
     return true;
@@ -105,10 +99,18 @@ export class CronogramaRepository {
     return data;
   }
 
-  async controlar(id: string, novoStatus: string) {
+  // AQUI FOI AJUSTADO: Mudamos o horario_inicio apenas na tabela pai que realmente tem a coluna
+  async controlar(id: string, novoStatus: string, forcarHorarioAgora: boolean = false) {
+    const updatePayload: any = { status_final: novoStatus };
+    
+    // A Gambiarra Oficial: Se for pra rodar agora, injeta a data/hora atual no cronograma!
+    if (forcarHorarioAgora) {
+      updatePayload.horario_inicio = new Date().toISOString();
+    }
+
     const { data, error } = await supabase
       .from('cronogramas')
-      .update({ status_final: novoStatus })
+      .update(updatePayload)
       .eq('id', id)
       .select()
       .single();
@@ -117,8 +119,8 @@ export class CronogramaRepository {
     return data;
   }
 
-  // --- A GAMBIARRA OFICIAL DE INTEGRAÇÃO AQUI ---
-  async atualizarStatusPrimeiroPasso(cronogramaId: string, status: string, forcarHorarioAgora: boolean = false) {
+  // AQUI FOI AJUSTADO: Apenas atualiza o status_passo, sem inventar coluna fantasma.
+  async atualizarStatusPrimeiroPasso(cronogramaId: string, status: string) {
     const { data: passo } = await supabase
       .from('cronograma_passos')
       .select('id')
@@ -127,17 +129,14 @@ export class CronogramaRepository {
       .single();
 
     if (passo) {
-      const updatePayload: any = { status_passo: status };
-      
-      // Se for Iniciar ou Continuar, injetamos a hora ATUAL para enganar o relógio do Arduino
-      if (forcarHorarioAgora) {
-        updatePayload.horario = new Date().toISOString(); 
-      }
-
-      await supabase
+      const { error } = await supabase
         .from('cronograma_passos')
-        .update(updatePayload)
+        .update({ status_passo: status })
         .eq('id', passo.id);
+
+      if (error) {
+        console.error("❌ ERRO AO ATUALIZAR PASSO:", error.message);
+      }
     }
   }
 }

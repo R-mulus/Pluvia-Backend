@@ -190,7 +190,8 @@ async function executarPasso(passo: any): Promise<void> {
                     break;
                 }
 
-                await sleep(150); 
+                // CORREÇÃO: Aumentado para 1000ms para não enforcar o Bridge e o simulador da Delta
+                await sleep(1000); 
             }
 
             if (stepConcluido) {

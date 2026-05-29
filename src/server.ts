@@ -9,7 +9,24 @@ import { AppError } from './shared/errors/AppError.js';
 const app = express();
 
 app.use(helmet());
-app.use(cors());
+app.use(cors({
+  origin: "*",
+  methods: [
+    "GET",
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE",
+    "OPTIONS"
+  ],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "Origin",
+    "Accept"
+  ],
+  credentials: true
+}))
 app.use(express.json());
 
 // Registro do Roteador

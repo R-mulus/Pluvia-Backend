@@ -16,6 +16,12 @@ export class LogsService {
     return data;
   }
 
+  async listarAlertas(limit: number, pivoId?: string) {
+    const { data, error } = await this.repository.listAlertas(limit, pivoId);
+    if (error) throw new AppError(error.message);
+    return data;
+  }
+
   async registrarEvento(dados: InsertEventLogDTO) {
     try {
       // Blindagem Absoluta: Tenta criar o log no banco

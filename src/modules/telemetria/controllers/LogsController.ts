@@ -23,6 +23,18 @@ class LogsController {
     }
   };
 
+  listarAlertas = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { pivoId } = req.query;
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+
+      const alertas = await this.logsService.listarAlertas(limit, pivoId as string);
+      res.json(alertas);
+    } catch (error) {
+      next(error);
+    }
+  };
+
   listarConexao = async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { pivoId } = req.params;

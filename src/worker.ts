@@ -35,6 +35,9 @@ const cronogramasEmProcessamento = new Set<string>();
 const cronogramasDiagnosticados = new Set<string>(); 
 let modbusConectado = false;
 
+// --- TIPAGEM DE STATUS ---
+type StatusExecucao = 'aguardando' | 'executando' | 'concluido' | 'falha' | 'cancelado' | 'interrompido';
+
 // --- UTILITÁRIOS ---
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -106,6 +109,39 @@ async function modbusReadCoils(pivoId: string, address: number, length: number):
 }
 
 // ============================================================================
+// FUNÇÕES DE ATUALIZAÇÃO DE ESTADO NO BANCO DE DADOS
+// ============================================================================
+
+/**
+ * Atualiza o status geral de um cronograma e, opcionalmente, o seu estado de atividade.
+ */
+async function atualizarStatusCronograma(id: string, status: StatusExecucao, isAtivo?: boolean) {
+    try {
+        const payload: any = { status_final: status };
+        if (isAtivo !== undefined) {
+            payload.is_ativo = isAtivo;
+        }
+        
+        const { error } = await supabase.from('cronogramas').update(payload).eq('id', id);
+        if (error) console.error(`[\x1b[31mDB ERRO\x1b[0m] Falha ao atualizar cronograma ${id}:`, error.message);
+    } catch (err: any) {
+        console.error(`[\x1b[31mDB EXCEPTION\x1b[0m] Exceção ao atualizar cronograma ${id}:`, err.message);
+    }
+}
+
+/**
+ * Atualiza o status individual de um passo do cronograma.
+ */
+async function atualizarStatusPasso(id: string, status: StatusExecucao) {
+    try {
+        const { error } = await supabase.from('cronograma_passos').update({ status_passo: status }).eq('id', id);
+        if (error) console.error(`[\x1b[31mDB ERRO\x1b[0m] Falha ao atualizar passo ${id}:`, error.message);
+    } catch (err: any) {
+        console.error(`[\x1b[31mDB EXCEPTION\x1b[0m] Exceção ao atualizar passo ${id}:`, err.message);
+    }
+}
+
+// ============================================================================
 // LÓGICA DE LIMPEZA PRECISA E MINIMALISTA
 // ============================================================================
 async function executarLimpezaProfundaCLP(pivoId: string, contexto: string) {
@@ -147,6 +183,9 @@ async function executarLimpezaProfundaCLP(pivoId: string, contexto: string) {
 async function executarPasso(passo: any, pivoId: string, cronogramaId: string) {
     console.log(`\n[\x1b[35mEXECUTANDO\x1b[0m] Iniciando Passo ${passo.ordem} do Cronograma ${cronogramaId}`);
     
+    // Atualiza status do passo no banco para executando
+    await atualizarStatusPasso(passo.id, 'executando');
+
     await modbusWriteCoil(pivoId, COIL_START, false);
     await modbusWriteCoil(pivoId, COIL_DONE, false);
     await sleep(200);
@@ -155,7 +194,7 @@ async function executarPasso(passo: any, pivoId: string, cronogramaId: string) {
     await modbusWriteRegister(pivoId, REG_ANG_FIM, passo.angulo_final);
     await modbusWriteRegister(pivoId, REG_VELOCIDADE, passo.percentimetro);
     
-    const direcaoBit = (passo.direcao === 'REVERSO') ? true : false;
+    const direcaoBit = (passo.direcao === 'REVERSO' || passo.direcao === 'ANTI_HORARIO') ? true : false; //Nome no banco pode ser tanto ANTI_HORARIO quanto REVERSO
     await modbusWriteCoil(pivoId, COIL_DIRECAO, direcaoBit);
     await modbusWriteCoil(pivoId, COIL_BOMBA, passo.irrigacao);
 
@@ -175,6 +214,9 @@ async function executarPasso(passo: any, pivoId: string, cronogramaId: string) {
         if ((tempoAtual - tempoInicio) > (TIMEOUT_SEGUNDOS * 1000)) {
             console.error(`[\x1b[31mTIMEOUT\x1b[0m] Falha no M10! Timeout atingido após ${TIMEOUT_SEGUNDOS}s.`);
             console.log(`  └─ Total de leituras falhas: ${leituras}`);
+            
+            // Registra a falha no banco de dados para este passo antes de jogar o Erro para cima
+            await atualizarStatusPasso(passo.id, 'falha');
             throw new Error(`Timeout no Passo ${passo.ordem}`);
         }
 
@@ -194,6 +236,9 @@ async function executarPasso(passo: any, pivoId: string, cronogramaId: string) {
                 const tempoGasto = tempoAtual - tempoInicio;
                 console.log(`[\x1b[32mSUCESSO\x1b[0m] Confirmação de conclusão recebida! (Tempo total: ${tempoGasto}ms | Leituras: ${leituras})`);
                 
+                // Conclui o passo no banco de dados
+                await atualizarStatusPasso(passo.id, 'concluido');
+
                 await executarLimpezaProfundaCLP(pivoId, `Pós-Passo ${passo.ordem}`);
                 break;
             }
@@ -209,7 +254,8 @@ async function processarCronograma(cronograma: any) {
     console.log(`[\x1b[36mCRONOGRAMA\x1b[0m] Iniciando Cronograma ID: ${cronograma.id}`);
     
     try {
-        await supabase.from('cronogramas').update({ status_final: 'executando' }).eq('id', cronograma.id);
+        // Marca o Cronograma como em andamento
+        await atualizarStatusCronograma(cronograma.id, 'executando');
 
         const { data: passos, error } = await supabase
             .from('cronograma_passos')
@@ -228,14 +274,17 @@ async function processarCronograma(cronograma: any) {
             }
         }
 
-        await supabase.from('cronogramas').update({ status_final: 'concluido' }).eq('id', cronograma.id);
+        // Finaliza cronograma com sucesso, marcando-o como concluído e definindo "is_ativo" como FALSE
+        await atualizarStatusCronograma(cronograma.id, 'concluido', false);
         console.log(`[\x1b[32mCONCLUÍDO\x1b[0m] Cronograma ${cronograma.id} finalizado com sucesso!`);
         
         await executarLimpezaProfundaCLP(cronograma.pivo_id, "Fim de Cronograma");
 
     } catch (err: any) {
         console.error(`[\x1b[31mFALHA\x1b[0m] Erro no Cronograma ${cronograma.id}:`, err.message);
-        await supabase.from('cronogramas').update({ status_final: 'falha' }).eq('id', cronograma.id);
+        
+        // Em caso de falha/timeout, marca como falho e encerra (is_ativo = false)
+        await atualizarStatusCronograma(cronograma.id, 'falha', false);
         await registrarEvento({ tipoEvento: 'erro', codigo: EVENT_CODES.ERRO_WORKER });
         
         await executarLimpezaProfundaCLP(cronograma.pivo_id, "Falha/Aborto");

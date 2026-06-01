@@ -43,4 +43,4 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`[STATUS] Servidor Pluvia operativa em http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`[STATUS] Servidor Pluvia operativo em http://localhost:${PORT}`));

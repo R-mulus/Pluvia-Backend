@@ -56,9 +56,9 @@ const int LED_ROTACAO = 11; // Verde: Rotação ativa
 const int LED_MOTOR   = 12; // Amarelo: Motor ativo
 
 // LED RGB de Alertas (Pinos PWM: 3=R, 5=G, 6=B)
-const int LED_RGB_R   = 3;
-const int LED_RGB_G   = 5;
-const int LED_RGB_B   = 6;
+const int LED_RGB_R = 5;
+const int LED_RGB_G = 6;
+const int LED_RGB_B = 3;
 
 
 // VARIÁVEIS DE CONTROLE ESTÁTICAS
@@ -128,7 +128,7 @@ void setup() {
   coreografiaAtiva = false;
   interromperLacos = false;
 
-  setCorRGB(255, 0, 255); 
+  setCorRGB(0, 0, 255); 
   delay(300); 
   setCorRGB(0, 0, 0);
 
@@ -169,7 +169,7 @@ void loop() {
     } else {
       static unsigned long ultimoPiscaDesconectado = 0;
       static bool estadoPiscaDesconectado = false;
-      if (millis() - ultimoPiscaDesconectado >= 500) {
+      if (millis() - ultimoPiscaDesconectado >= 300) {
         ultimoPiscaDesconectado = millis();
         estadoPiscaDesconectado = !estadoPiscaDesconectado;
         setCorRGB(estadoPiscaDesconectado ? 255 : 0, 0, 0); // Pisca Vermelho

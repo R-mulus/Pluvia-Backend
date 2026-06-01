@@ -21,11 +21,11 @@ let timeoutSeguranca = null;
 
 const DIR_AUMENTA = 0;
 // Legado mantido para retrocompatibilidade
-let TAXA_DIR_AUMENTA = 10.4; 
+let TAXA_DIR_AUMENTA = 10; 
 
 const DIR_DIMINUI = 1;
 // Legado mantido para retrocompatibilidade
-let TAXA_DIR_DIMINUI = 8; 
+let TAXA_DIR_DIMINUI = 10; 
 
 let VELOCIDADE_MOTOR = 30; 
 
@@ -34,16 +34,16 @@ let VELOCIDADE_MOTOR = 30;
 // =========================================================================
 const CALIBRACAO_ROTACAO = {
     [DIR_AUMENTA]: { // Sentido Horário
-        "0_90": 10,
-        "90_180": 12.6,
-        "180_270": 11,
-        "270_360": 10
+        "0_90": 13,
+        "90_180": 12,
+        "180_270": 13,
+        "270_360": 12
     },
     [DIR_DIMINUI]: { // Sentido Anti-Horário
-        "0_90": 10,
+        "0_90": 11,
         "90_180": 10,
         "180_270": 10,
-        "270_360": 8
+        "270_360": 11
     }
 };
 

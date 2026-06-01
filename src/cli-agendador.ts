@@ -165,7 +165,14 @@ export async function listarCronogramas() {
         .order('created_at', { ascending: false });
 
     if (error) throw new Error(`Erro ao listar cronogramas: ${error.message}`);
-    return data;
+    
+    // Formata a exibição para não mostrar a conversão UTC no terminal, alinhando com o que o worker lê.
+    const cronogramasFormatados = data.map((c: any) => ({
+        ...c,
+        horario_inicio: c.horario_inicio.replace(/(Z|[+-]\d{2}:\d{2})$/, '').replace('T', ' ')
+    }));
+    
+    return cronogramasFormatados;
 }
 
 // ============================================================================
@@ -321,7 +328,18 @@ async function iniciarCLI() {
                     case '1': {
                         const nome = await perguntar("Nome do cronograma (ex: Rega Noturna): ");
                         const horario = await perguntar("Horário de início (HH:mm): ");
-                        const dataHoje = new Date().toISOString().split('T')[0]; 
+                        
+                        // --- CORREÇÃO DE ALINHAMENTO COM O WORKER ---
+                        // Pega a data local garantindo que o "dia" será o mesmo do relógio local
+                        const agora = new Date();
+                        const ano = agora.getFullYear();
+                        const mes = String(agora.getMonth() + 1).padStart(2, '0');
+                        const dia = String(agora.getDate()).padStart(2, '0');
+                        const dataHojeLocal = `${ano}-${mes}-${dia}`;
+                        
+                        // Para funcionar perfeitamente com a "solução cirúrgica" do worker, cravamos os 
+                        // números exatos que o utilizador digitou no banco de dados usando a tag +00:00.
+                        const horarioInicioFormatado = `${dataHojeLocal}T${horario}:00+00:00`;
                         
                         const etapas = [];
                         let adicionarMais = true;
@@ -377,7 +395,7 @@ async function iniciarCLI() {
                         if (etapas.length > 0) {
                             await criarCronogramaCompleto({
                                 nome,
-                                horario_inicio: `${dataHoje}T${horario}:00.000Z`,
+                                horario_inicio: horarioInicioFormatado,
                                 pivo_id: pivoId,
                                 criado_por: usuarioId,
                                 etapas

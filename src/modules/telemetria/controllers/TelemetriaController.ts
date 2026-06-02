@@ -7,7 +7,6 @@ class TelemetriaController {
   getDashboard = async (req: Request, res: Response, next: NextFunction) => {
     try {
       const dados = await this.service.obterDashboardCompleto();
-      // Usamos o padrão de envelope (DefaultResponse) que combinamos
       res.json({ mensagem: "Dashboard carregado", dados });
     } catch (error) {
       next(error);

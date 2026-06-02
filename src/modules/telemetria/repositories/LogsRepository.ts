@@ -13,7 +13,6 @@ export class LogsRepository {
   async listEventLogs(pivoId: string, limit: number) {
     return await supabase
       .from('event_logs')
-      // A CORREÇÃO: Removemos o "cronogramas(nome)" daqui pois não existe FK no banco
       .select(`
         *, 
         usuarios(nome), 
@@ -24,17 +23,14 @@ export class LogsRepository {
       .limit(limit);
   }
 
-  // Busca especificamente anomalias, erros e alertas de falhas do hardware
   async listAlertas(limit: number, pivoId?: string) {
     let query = supabase
       .from('event_logs')
-      // Buscamos o nome do operador e do pivô para montar a notificação
       .select(`*, usuarios(nome), pivos(nome_pivo)`) 
       .in('tipo_evento', ['erro', 'alerta', 'falha'])
       .order('timestamp', { ascending: false })
       .limit(limit);
 
-    // Filtro opcional caso a tela queira ver só de um pivô específico
     if (pivoId && pivoId !== 'todos') {
       query = query.eq('pivo_id', pivoId);
     }

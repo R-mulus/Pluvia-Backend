@@ -2,12 +2,11 @@ import { supabase } from "../../../config/supabase.js";
 import type { CriarCronogramaDTO } from "../schemas/cronograma.schema.js";
 
 export class CronogramaRepository {
-  
   async buscarPorId(id: string) {
     const { data, error } = await supabase
-      .from('cronogramas')
-      .select('*')
-      .eq('id', id)
+      .from("cronogramas")
+      .select("*")
+      .eq("id", id)
       .single();
 
     if (error) throw new Error(error.message);
@@ -16,38 +15,44 @@ export class CronogramaRepository {
 
   async listarPorPivo(pivo_id: string) {
     const { data, error } = await supabase
-      .from('cronogramas')
-      .select(`
+      .from("cronogramas")
+      .select(
+        `
         *,
         usuarios!cronogramas_criado_por_fkey (nome),
         passos:cronograma_passos(*)
-      `)
-      .eq('pivo_id', pivo_id)
-      .order('created_at', { ascending: false });
+      `,
+      )
+      .eq("pivo_id", pivo_id)
+      .order("created_at", { ascending: false });
 
     if (error) throw new Error(error.message);
 
-    return data.map(item => {
-      const usuario = Array.isArray(item.usuarios) ? item.usuarios[0] : item.usuarios;
-      return { ...item, nome_criador: usuario?.nome || 'Desconhecido' };
+    return data.map((item) => {
+      const usuario = Array.isArray(item.usuarios)
+        ? item.usuarios[0]
+        : item.usuarios;
+      return { ...item, nome_criador: usuario?.nome || "Desconhecido" };
     });
   }
 
   async criarComPassos(dados: CriarCronogramaDTO) {
     const { data: cronograma, error: errorCrono } = await supabase
-      .from('cronogramas')
-      .insert([{ 
-        pivo_id: dados.pivo_id, 
-        criado_por: dados.criado_por, 
-        nome: dados.nome,
-        horario_inicio: dados.horario_inicio
-      }])
+      .from("cronogramas")
+      .insert([
+        {
+          pivo_id: dados.pivo_id,
+          criado_por: dados.criado_por,
+          nome: dados.nome,
+          horario_inicio: dados.horario_inicio,
+        },
+      ])
       .select()
       .single();
 
     if (errorCrono) throw new Error(errorCrono.message);
 
-    const passosFormatados = dados.passos.map(passo => ({
+    const passosFormatados = dados.passos.map((passo) => ({
       cronograma_id: cronograma.id,
       pivo_id: dados.pivo_id,
       preset_origem_id: passo.preset_origem_id,
@@ -57,16 +62,16 @@ export class CronogramaRepository {
       lamina: passo.lamina,
       irrigacao: passo.irrigacao,
       direcao: passo.direcao,
-      ordem: passo.ordem
+      ordem: passo.ordem,
     }));
 
     const { data: passos, error: errorPassos } = await supabase
-      .from('cronograma_passos')
+      .from("cronograma_passos")
       .insert(passosFormatados)
       .select();
 
     if (errorPassos) {
-      await supabase.from('cronogramas').delete().eq('id', cronograma.id);
+      await supabase.from("cronogramas").delete().eq("id", cronograma.id);
       throw new Error(errorPassos.message);
     }
 
@@ -84,14 +89,14 @@ export class CronogramaRepository {
 
   async ativar(id: string, pivo_id: string) {
     await supabase
-      .from('cronogramas')
+      .from("cronogramas")
       .update({ is_ativo: false })
-      .eq('pivo_id', pivo_id);
+      .eq("pivo_id", pivo_id);
 
     const { data, error } = await supabase
-      .from('cronogramas')
+      .from("cronogramas")
       .update({ is_ativo: true })
-      .eq('id', id)
+      .eq("id", id)
       .select()
       .single();
 
@@ -99,19 +104,21 @@ export class CronogramaRepository {
     return data;
   }
 
-  // AQUI FOI AJUSTADO: Mudamos o horario_inicio apenas na tabela pai que realmente tem a coluna
-  async controlar(id: string, novoStatus: string, forcarHorarioAgora: boolean = false) {
+  async controlar(
+    id: string,
+    novoStatus: string,
+    forcarHorarioAgora: boolean = false,
+  ) {
     const updatePayload: any = { status_final: novoStatus };
-    
-    // A Gambiarra Oficial: Se for pra rodar agora, injeta a data/hora atual no cronograma!
+
     if (forcarHorarioAgora) {
       updatePayload.horario_inicio = new Date().toISOString();
     }
 
     const { data, error } = await supabase
-      .from('cronogramas')
+      .from("cronogramas")
       .update(updatePayload)
-      .eq('id', id)
+      .eq("id", id)
       .select()
       .single();
 
@@ -119,23 +126,22 @@ export class CronogramaRepository {
     return data;
   }
 
-  // AQUI FOI AJUSTADO: Apenas atualiza o status_passo, sem inventar coluna fantasma.
   async atualizarStatusPrimeiroPasso(cronogramaId: string, status: string) {
     const { data: passo } = await supabase
-      .from('cronograma_passos')
-      .select('id')
-      .eq('cronograma_id', cronogramaId)
-      .eq('ordem', 1)
+      .from("cronograma_passos")
+      .select("id")
+      .eq("cronograma_id", cronogramaId)
+      .eq("ordem", 1)
       .single();
 
     if (passo) {
       const { error } = await supabase
-        .from('cronograma_passos')
+        .from("cronograma_passos")
         .update({ status_passo: status })
-        .eq('id', passo.id);
+        .eq("id", passo.id);
 
       if (error) {
-        console.error("❌ ERRO AO ATUALIZAR PASSO:", error.message);
+        console.error("ERRO AO ATUALIZAR PASSO:", error.message);
       }
     }
   }

@@ -1,22 +1,25 @@
-import { z } from 'zod';
+import { z } from "zod";
 
 export const PassoSchema = z.object({
-  // Relaxamos a validação aqui. Deixa o Supabase decidir se é válido ou não!
-  preset_origem_id: z.string().nullable().optional(), 
+  preset_origem_id: z.string().nullable().optional(),
   nome: z.string().min(3),
   angulo_inicial: z.number().min(0).max(360),
   angulo_final: z.number().min(0).max(360),
   lamina: z.number().min(0),
   irrigacao: z.boolean(),
-  direcao: z.enum(['HORARIO', 'ANTI_HORARIO']),
-  ordem: z.number().min(1) 
+  direcao: z.enum(["HORARIO", "ANTI_HORARIO"]),
+  ordem: z.number().min(1),
 });
 
 export const CronogramaSchema = z.object({
   pivo_id: z.string().uuid("ID do pivô inválido"),
   nome: z.string().min(3, "Nome do cronograma obrigatório"),
-  horario_inicio: z.string(), // Relaxado para evitar conflitos de ISO no Zod
-  passos: z.array(PassoSchema).min(1, "O cronograma deve ter pelo menos um passo")
+  horario_inicio: z.string(),
+  passos: z
+    .array(PassoSchema)
+    .min(1, "O cronograma deve ter pelo menos um passo"),
 });
 
-export type CriarCronogramaDTO = z.infer<typeof CronogramaSchema> & { criado_por: string };
+export type CriarCronogramaDTO = z.infer<typeof CronogramaSchema> & {
+  criado_por: string;
+};

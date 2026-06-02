@@ -61,11 +61,15 @@ class CronogramaController {
       if (!operador_id) throw new Error("Usuário não autenticado");
 
       const { id } = req.params;
-      const { pivo_id } = req.body; 
+      const { pivo_id } = req.body;
 
       if (!pivo_id) throw new Error("ID do pivô é obrigatório");
 
-      const ativado = await this.service.ativar(id as string, pivo_id, operador_id);
+      const ativado = await this.service.ativar(
+        id as string,
+        pivo_id,
+        operador_id,
+      );
       res
         .status(200)
         .json({ mensagem: "Cronograma ativado com sucesso!", dados: ativado });
@@ -81,7 +85,7 @@ class CronogramaController {
       if (!operador_id) throw new Error("Usuário não autenticado");
 
       const { id } = req.params;
-      const { acao } = req.body; 
+      const { acao } = req.body;
 
       if (!["iniciar", "pausar", "continuar"].includes(acao)) {
         throw new Error("Ação inválida");
@@ -90,14 +94,12 @@ class CronogramaController {
       const atualizado = await this.service.controlar(
         id as string,
         acao as any,
-        operador_id
+        operador_id,
       );
-      res
-        .status(200)
-        .json({
-          mensagem: `Comando de ${acao} recebido com sucesso!`,
-          dados: atualizado,
-        });
+      res.status(200).json({
+        mensagem: `Comando de ${acao} recebido com sucesso!`,
+        dados: atualizado,
+      });
     } catch (error) {
       next(error);
     }

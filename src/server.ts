@@ -9,6 +9,8 @@ import { AppError } from './shared/errors/AppError.js';
 const app = express();
 
 app.use(helmet());
+
+// * Certificando que não vai haver erro de CORS
 app.use(cors({
   origin: "*",
   methods: [
@@ -28,11 +30,8 @@ app.use(cors({
   credentials: true
 }))
 app.use(express.json());
-
-// Registro do Roteador
 app.use(router);
 
-// Middleware Global de Erro
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   if (err instanceof AppError) {
     return res.status(err.statusCode).json({ status: 'error', message: err.message });

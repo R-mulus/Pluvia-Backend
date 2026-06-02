@@ -6,7 +6,7 @@ import type { CriarCronogramaDTO } from "../schemas/cronograma.schema.js";
 export class CronogramaService {
   constructor(
     private cronogramaRepository: CronogramaRepository,
-    private logsService: LogsService, 
+    private logsService: LogsService,
   ) {}
 
   async listarPorPivo(pivoId: string) {
@@ -19,14 +19,15 @@ export class CronogramaService {
 
   async agendar(dados: CriarCronogramaDTO) {
     try {
-      const novoAgendamento = await this.cronogramaRepository.criarComPassos(dados);
+      const novoAgendamento =
+        await this.cronogramaRepository.criarComPassos(dados);
 
       await this.logsService.registrarEvento({
         pivo_id: dados.pivo_id,
         operador_id: dados.criado_por,
-        tipo_evento: "comando", 
+        tipo_evento: "comando",
         cronograma_id: novoAgendamento.id,
-        codigo: `CRONOGRAMA_AGENDADO`, 
+        codigo: `CRONOGRAMA_AGENDADO`,
       });
 
       return novoAgendamento;
@@ -38,13 +39,13 @@ export class CronogramaService {
   async deletar(id: string, operador_id: string) {
     try {
       const cronograma = await this.cronogramaRepository.buscarPorId(id);
-      
+
       await this.cronogramaRepository.deletar(id);
 
       await this.logsService.registrarEvento({
         pivo_id: cronograma.pivo_id,
         operador_id: operador_id,
-        tipo_evento: "comando", 
+        tipo_evento: "comando",
         codigo: `CRONOGRAMA_EXCLUIDO:${cronograma.nome}`,
       });
     } catch (error: any) {
@@ -59,7 +60,7 @@ export class CronogramaService {
       await this.logsService.registrarEvento({
         pivo_id: pivo_id,
         operador_id: operador_id,
-        tipo_evento: "comando", 
+        tipo_evento: "comando",
         cronograma_id: id,
         codigo: `CRONOGRAMA_ATIVADO`,
       });
@@ -70,35 +71,49 @@ export class CronogramaService {
     }
   }
 
-  async controlar(id: string, acao: "iniciar" | "pausar" | "continuar", operador_id: string) {
+  async controlar(
+    id: string,
+    acao: "iniciar" | "pausar" | "continuar",
+    operador_id: string,
+  ) {
     try {
       let novoStatus = "aguardando";
       let statusPasso = "aguardando";
-      let forcarHorarioAgora = false; 
+      let forcarHorarioAgora = false;
 
       if (acao === "iniciar" || acao === "continuar") {
         novoStatus = "executando";
         statusPasso = "executando";
-        forcarHorarioAgora = true; 
+        forcarHorarioAgora = true;
       } else if (acao === "pausar") {
         novoStatus = "interrompido";
         statusPasso = "interrompido";
       }
 
       const cronograma = await this.cronogramaRepository.buscarPorId(id);
-      
-      // AJUSTE AQUI: O forcarHorarioAgora vai pro controlar() onde a coluna horario_inicio existe!
-      const atualizado = await this.cronogramaRepository.controlar(id, novoStatus, forcarHorarioAgora);
-      
-      // AJUSTE AQUI: O passo só muda o status agora.
-      await this.cronogramaRepository.atualizarStatusPrimeiroPasso(id, statusPasso);
+
+      const atualizado = await this.cronogramaRepository.controlar(
+        id,
+        novoStatus,
+        forcarHorarioAgora,
+      );
+
+      await this.cronogramaRepository.atualizarStatusPrimeiroPasso(
+        id,
+        statusPasso,
+      );
 
       await this.logsService.registrarEvento({
         pivo_id: cronograma.pivo_id,
         operador_id: operador_id,
-        tipo_evento: acao === 'pausar' ? 'pausa_manual' : 'comando', 
+        tipo_evento: acao === "pausar" ? "pausa_manual" : "comando",
         cronograma_id: id,
-        codigo: acao === 'pausar' ? 'PARADA_MANUAL' : (acao === 'iniciar' ? 'CRONOGRAMA_INICIADO' : 'COMANDO_CONTINUAR'), 
+        codigo:
+          acao === "pausar"
+            ? "PARADA_MANUAL"
+            : acao === "iniciar"
+              ? "CRONOGRAMA_INICIADO"
+              : "COMANDO_CONTINUAR",
       });
 
       return atualizado;

@@ -1,19 +1,16 @@
-import { CadastroRepository } from '../repositories/CadastroRepository.js';
-import { 
-  type CriarUsuarioDTO, 
-  type CriarFazendaDTO, 
-  type CriarPivoDTO
-} from '../schemas/cadastro.schema.js';
-import { AppError } from '../../../shared/errors/AppError.js';
+import { CadastroRepository } from "../repositories/CadastroRepository.js";
+import {
+  type CriarUsuarioDTO,
+  type CriarFazendaDTO,
+  type CriarPivoDTO,
+} from "../schemas/cadastro.schema.js";
+import { AppError } from "../../../shared/errors/AppError.js";
 
 export class CadastroService {
-  // Injeção de dependência única. O atributo 'cadastroRepository' fica disponível automaticamente.
   constructor(private cadastroRepository: CadastroRepository) {}
 
-  // ==========================================
-  // 1. DOMÍNIO: USUÁRIOS
-  // ==========================================
-  
+  // * --------------- USUÁRIOS ---------------
+
   async listarUsuarios() {
     const { data, error } = await this.cadastroRepository.listUsuarios();
     if (error) throw new AppError(error.message);
@@ -34,26 +31,37 @@ export class CadastroService {
   }
 
   async atualizarUsuario(id: string, dados: Partial<CriarUsuarioDTO>) {
-    const { data, error } = await this.cadastroRepository.updateUsuario(id, dados);
+    const { data, error } = await this.cadastroRepository.updateUsuario(
+      id,
+      dados,
+    );
     if (error) throw new AppError(error.message);
-    if (!data) throw new AppError("Usuário não encontrado para atualização", 404);
+    if (!data)
+      throw new AppError("Usuário não encontrado para atualização", 404);
     return data;
   }
 
   async deletarUsuario(id: string) {
-    const { temFazendas, temOperacoes } = await this.cadastroRepository.getUsuarioRelacoes(id);
+    const { temFazendas, temOperacoes } =
+      await this.cadastroRepository.getUsuarioRelacoes(id);
 
-    if (temFazendas) throw new AppError("Impossível eliminar: Usuário é proprietário de uma ou mais fazendas.", 400);
-    if (temOperacoes) throw new AppError("Impossível eliminar: Usuário está vinculado como operador de pivôs.", 400);
+    if (temFazendas)
+      throw new AppError(
+        "Impossível eliminar: Usuário é proprietário de uma ou mais fazendas.",
+        400,
+      );
+    if (temOperacoes)
+      throw new AppError(
+        "Impossível eliminar: Usuário está vinculado como operador de pivôs.",
+        400,
+      );
 
     const { error } = await this.cadastroRepository.deleteUsuario(id);
     if (error) throw new AppError(error.message);
   }
 
-  // ==========================================
-  // 2. DOMÍNIO: FAZENDAS
-  // ==========================================
-  
+  // * --------------- FAZENDAS ---------------
+
   async listarFazendas() {
     const { data, error } = await this.cadastroRepository.listFazendas();
     if (error) throw new AppError(error.message);
@@ -68,38 +76,47 @@ export class CadastroService {
   }
 
   async criarFazenda(dados: CriarFazendaDTO) {
-    // REGRA DE NEGÓCIO: Verificar se o proprietário (usuário) realmente existe antes do insert
-    const { data: proprietario, error: errProp } = await this.cadastroRepository.getUsuarioById(dados.proprietario_id);
-    
+    const { data: proprietario, error: errProp } =
+      await this.cadastroRepository.getUsuarioById(dados.proprietario_id);
+
     if (errProp || !proprietario) {
-      throw new AppError('O proprietário especificado não foi encontrado no sistema.', 404);
+      throw new AppError(
+        "O proprietário especificado não foi encontrado no sistema.",
+        404,
+      );
     }
 
     const { data, error } = await this.cadastroRepository.createFazenda(dados);
     if (error) throw new AppError(error.message);
-    
+
     return data;
   }
 
   async atualizarFazenda(id: string, dados: Partial<CriarFazendaDTO>) {
-    const { data, error } = await this.cadastroRepository.updateFazenda(id, dados);
+    const { data, error } = await this.cadastroRepository.updateFazenda(
+      id,
+      dados,
+    );
     if (error) throw new AppError(error.message);
-    if (!data) throw new AppError("Fazenda não encontrada para atualização", 404);
+    if (!data)
+      throw new AppError("Fazenda não encontrada para atualização", 404);
     return data;
   }
 
   async deletarFazenda(id: string) {
     const temPivos = await this.cadastroRepository.getPivosDaFazenda(id);
-    if (temPivos) throw new AppError("Impossível eliminar: Esta fazenda ainda possui pivôs registrados.", 400);
+    if (temPivos)
+      throw new AppError(
+        "Impossível eliminar: Esta fazenda ainda possui pivôs registrados.",
+        400,
+      );
 
     const { error } = await this.cadastroRepository.deleteFazenda(id);
     if (error) throw new AppError(error.message);
   }
 
-  // ==========================================
-  // 3. DOMÍNIO: PIVÔS
-  // ==========================================
-  
+  // * --------------- PIVÔS ---------------
+
   async listarPivos() {
     const { data, error } = await this.cadastroRepository.listPivos();
     if (error) throw new AppError(error.message);
@@ -114,7 +131,6 @@ export class CadastroService {
   }
 
   async criarPivo(dados: CriarPivoDTO) {
-    // Futura integração do requisito RF02 (Regra de teste de ping de hardware) será acoplada aqui
     const { data, error } = await this.cadastroRepository.createPivo(dados);
     if (error) throw new AppError(error.message);
     return data;

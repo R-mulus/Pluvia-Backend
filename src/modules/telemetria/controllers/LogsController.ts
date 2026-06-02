@@ -2,13 +2,11 @@ import type { Request, Response, NextFunction } from "express";
 import { LogsService } from "../services/LogsService.js";
 
 class LogsController {
-  // Agora usamos o serviço dedicado aos logs
   private logsService = new LogsService();
 
   listarEventos = async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { pivoId } = req.params;
-      // Garante que o limite seja um número inteiro, padrão 50 (conforme RF06)
       const limit = req.query.limit
         ? parseInt(req.query.limit as string, 10)
         : 50;
@@ -26,9 +24,14 @@ class LogsController {
   listarAlertas = async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { pivoId } = req.query;
-      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+      const limit = req.query.limit
+        ? parseInt(req.query.limit as string, 10)
+        : 50;
 
-      const alertas = await this.logsService.listarAlertas(limit, pivoId as string);
+      const alertas = await this.logsService.listarAlertas(
+        limit,
+        pivoId as string,
+      );
       res.json(alertas);
     } catch (error) {
       next(error);

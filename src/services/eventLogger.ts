@@ -5,14 +5,13 @@ export interface EventLogPayload {
     cronogramaPassoId?: string;
     pivoId?: string;
     operadorId?: string;
-    tipoEvento: 'comando' | 'sensor' | 'pausa_manual' | 'pausa_automatica' | 'erro' | 'alerta' | 'conclusao';
+    tipoEvento: 'comando' | 'sensor' | 'pausa_manual' | 'pausa_automatica' | 'erro' | 'alerta' | 'conclusao'; //ENUM_TYPES do banco de dados
     codigo: string;
 }
 
-/**
- * Serviço centralizado para registro de eventos (Auditoria do Pivô).
- * Toda gravação na tabela `event_logs` DEVE passar por aqui.
- */
+//A parte lá de registro de eventos de auditoria do pivô
+//Toda gravação na tabela event_logs DEVE passar por aqui.
+
 export async function registrarEvento(payload: EventLogPayload): Promise<void> {
     try {
         const { error } = await supabase.from('event_logs').insert([{
@@ -25,9 +24,9 @@ export async function registrarEvento(payload: EventLogPayload): Promise<void> {
         }]);
 
         if (error) {
-            console.error('❌ [LOGGER ERROR] Falha ao gravar evento no banco:', error.message);
+            console.error('[LOGGER ERROR] Falha ao gravar evento no banco:', error.message);
         }
     } catch (err: any) {
-        console.error('❌ [LOGGER EXCEPTION] Erro crítico no serviço de eventos:', err.message);
+        console.error('[LOGGER EXCEPTION] Erro crítico no serviço de eventos:', err.message);
     }
 }

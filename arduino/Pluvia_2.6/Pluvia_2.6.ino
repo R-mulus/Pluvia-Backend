@@ -132,7 +132,7 @@ void setup() {
   delay(300); 
   setCorRGB(0, 0, 0);
 
-  Serial.println(F("[SYS] Inicializando controlador..."));
+  Serial.println(F("[\x1b[33mSYS\x1b[0m] Inicializando controlador."));
 
   if(display.begin(SSD1306_SWITCHCAPVCC, 0x3C, false, false)) {
     oledAtivo = true;
@@ -147,7 +147,7 @@ void setup() {
     atualizarOLED("Standby", anguloAtual);
     Serial.println(F("STANDBY"));
   } else {
-    Serial.println(F("[ERRO] OLED indisponivel."));
+    Serial.println(F("[\x1b[31mERRO\x1b[0m] OLED indisponivel."));
     Serial.println(F("STANDBY"));
   }
 
@@ -178,7 +178,7 @@ void loop() {
 
     // Status de Escuta
     if (!escutandoLogsExibido) {
-      Serial.println(F("[ARDUINO] Ocioso. Aguardando novos comandos..."));
+      Serial.println(F("[\x1b[32mSTATUS\x1b[0m] Aguardando novos comandos..."));
       escutandoLogsExibido = true;
     }
   }
@@ -252,7 +252,7 @@ void lerSerial() {
 
         if (strlen(pacote) > 0) {
           if (strncmp(pacote, "HB", 2) != 0) {
-            Serial.print(F("[REC] <"));
+            Serial.print(F("[\x1b[36mREC\x1b[0m] <"));
             Serial.print(pacote);
             Serial.println(F(">"));
           }
@@ -281,7 +281,7 @@ void processarComando(char* pacote) {
 
   // Se houver uma coreografia física ativa, ignora, exceto o comando absoluto FREE/STOP
   if (coreografiaAtiva && strcmp(pacote, "FREE") != 0) {
-    Serial.println(F("[SYS] Ignorando - Coreografia em andamento."));
+    Serial.println(F("[\x1b[33mSYS\x1b[0m] Ignorando - Coreografia em andamento."));
     return;
   }
 
@@ -374,7 +374,7 @@ void processarComando(char* pacote) {
     }
 
     if (parsed < 4) {
-      Serial.println(F("[ERRO] Comando Serial malformado."));
+      Serial.println(F("[\x1b[31mERRO\x1b[0m] Comando Serial malformado."));
       return;
     }
 
@@ -397,7 +397,7 @@ void processarComando(char* pacote) {
 void coreografiaAlinhamento() {
   interromperLacos = false;
   coreografiaAtiva = true; 
-  Serial.println(F("[SYS] Alinhando pivo..."));
+  Serial.println(F("[\x1b[33mSYS\x1b[0m] Alinhando pivo..."));
   
   apagarTodosLeds();
   atualizarOLED("Alinhando", anguloAlvo);
@@ -415,10 +415,10 @@ void coreografiaAlinhamento() {
 void coreografiaIrrigacao() {
   interromperLacos = false;
   coreografiaAtiva = true; 
-  Serial.println(F("[SYS] Executando irrigacao..."));
+  Serial.println(F("[\x1b[33mSYS\x1b[0m] Executando irrigacao..."));
   
   apagarTodosLeds();
-  atualizarOLED("Preparando", anguloAlvo);
+  atualizarOLED("Executando", anguloAlvo);
 
   if (usarAgua) {
     digitalWrite(LED_AGUA, HIGH);
@@ -439,7 +439,7 @@ void desligamentoSuave() {
   interromperLacos = false;
   coreografiaAtiva = true;
   atualizarOLED("Desligando", anguloAlvo);
-  Serial.println(F("[SYS] Desligamento programado."));
+  Serial.println(F("[\x1b[33mSYS\x1b[0m] Desligamento programado."));
   
   digitalWrite(LED_ROTACAO, LOW);
   if (!esperaSegura(1000)) { coreografiaAtiva = false; return; }
@@ -465,9 +465,9 @@ void iniciarMovimento() {
   
   int pwmValue = 1500;
   if (dirAtual == 0) { 
-    pwmValue = map(velAtual, 0, 100, 1500, 1000); // Horário
+    pwmValue = map(velAtual, 0, 100, 1500, 1000); // HORARIO
   } else {             
-    pwmValue = map(velAtual, 0, 100, 1500, 2000); // Reverso
+    pwmValue = map(velAtual, 0, 100, 1500, 2000); // ANTI_HORARIO
   }
 
   pivoServo.writeMicroseconds(pwmValue);

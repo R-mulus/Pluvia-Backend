@@ -82,8 +82,8 @@ export class CronogramaService {
       let forcarHorarioAgora = false;
 
       if (acao === "iniciar" || acao === "continuar") {
-        novoStatus = "executando";
-        statusPasso = "executando";
+        novoStatus = "aguardando";
+        statusPasso = "aguardando";
         forcarHorarioAgora = true;
       } else if (acao === "pausar") {
         novoStatus = "interrompido";

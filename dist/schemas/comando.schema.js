@@ -2,7 +2,7 @@ import { z } from 'zod';
 export const ComandoCronogramaSchema = z.object({
     pivoId: z.string().uuid(),
     criadoPor: z.string().uuid(),
-    horario: z.string().datetime(), // ISO string para timestamptz
+    horario: z.string().datetime(),
     comando: z.object({
         percentimetro: z.number().min(0).max(100),
         angulo_inicial: z.number(),

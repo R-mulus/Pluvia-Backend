@@ -112,7 +112,9 @@ export class CronogramaRepository {
     const updatePayload: any = { status_final: novoStatus };
 
     if (forcarHorarioAgora) {
-      updatePayload.horario_inicio = new Date().toISOString();
+      // FIX DO FUSO HORÁRIO: Tira as 3 horas e tira o "Z" do final para o Postgres salvar a hora pura
+      const dataLocalAjustada = new Date(Date.now() - (3 * 60 * 60 * 1000) - 60000);
+      updatePayload.horario_inicio = dataLocalAjustada.toISOString().slice(0, -1);
     }
 
     const { data, error } = await supabase
@@ -127,6 +129,12 @@ export class CronogramaRepository {
   }
 
   async atualizarStatusPrimeiroPasso(cronogramaId: string, status: string) {
+    await supabase
+      .from("cronograma_passos")
+      .update({ status_passo: "aguardando" })
+      .eq("cronograma_id", cronogramaId);
+
+    // Depois busca apenas o primeiro passo (ordem 1)
     const { data: passo } = await supabase
       .from("cronograma_passos")
       .select("id")
@@ -134,6 +142,7 @@ export class CronogramaRepository {
       .eq("ordem", 1)
       .single();
 
+    // E atualiza apenas o primeiro passo para "executando"
     if (passo) {
       const { error } = await supabase
         .from("cronograma_passos")

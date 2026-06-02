@@ -145,10 +145,10 @@ void setup() {
     delay(2500);
     
     atualizarOLED("Standby", anguloAtual);
-    Serial.println(F("STANDBY"));
+    Serial.println(F("\x1b[36mSTANDBY\x1b[0m"));
   } else {
     Serial.println(F("[\x1b[31mERRO\x1b[0m] OLED indisponivel."));
-    Serial.println(F("STANDBY"));
+    Serial.println(F("\x1b[36mSTANDBY\x1b[0m"));
   }
 
   pivoServo.attach(PIN_SERVO);
@@ -213,7 +213,7 @@ void loop() {
       } else {
         digitalWrite(LED_MOTOR, LOW);
         atualizarOLED("Standby", anguloAlvo);
-        Serial.println(F("STANDBY"));
+        Serial.println(F("\x1b[36mSTANDBY\x1b[0m"));
       }
       modoAtual = MODO_STANDBY;
     }
@@ -336,7 +336,7 @@ void processarComando(char* pacote) {
       anguloAlvo = anguloAtual;
       atualizarOLED("Calibrado", anguloAtual);
       piscarRGB(0, 255, 0, 2);
-      Serial.println(F("STANDBY"));
+      Serial.println(F("\x1b[36mSTANDBY\x1b[0m"));
     }
     return;
   }
@@ -452,7 +452,7 @@ void desligamentoSuave() {
   atualizarOLED("Standby", anguloAlvo);
   anguloAtual = anguloAlvo;
   coreografiaAtiva = false;
-  Serial.println(F("STANDBY"));
+  Serial.println(F("\x1b[36mSTANDBY\x1b[0m"));
 }
 
 

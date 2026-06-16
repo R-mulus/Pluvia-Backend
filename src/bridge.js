@@ -1,5 +1,3 @@
-
-
 // ATENÇÃO: O Polling não funciona muito bem (Congestionamento das portas dos coils), 
 // as vezes vc tem q dar um STOP e RUN no ISPsoft pra limpar a memória do coil M0 e M10
 
@@ -20,6 +18,7 @@ const rl = readline.createInterface({ input: process.stdin, output: process.stdo
 const usarCLP = true; 
 let sistemaOcupado = false; 
 let timeoutSeguranca = null; 
+let ultimoM0 = false; // Detecta a borda de subida do M0
 
 // VARIÁVEIS DE FÍSICA PRO ARDUINO ------------------------------------
 
@@ -37,6 +36,22 @@ let VELOCIDADE_MOTOR = 30;  //30% da velocidade
 
 const CALIBRACAO_ROTACAO = {
     [DIR_AUMENTA]: {    // HORARIO
+        "0_90": 15,
+        "90_180": 15,
+        "180_270": 17,
+        "270_360": 14
+    },
+    [DIR_DIMINUI]: {    // ANTI_HORARIO
+        "0_90": 19,
+        "90_180": 17,
+        "180_270": 15,
+        "270_360": 20 //MAIS Problemático
+    }
+};
+
+/*
+const CALIBRACAO_ROTACAO = {
+    [DIR_AUMENTA]: {    // HORARIO
         "0_90": 13,
         "90_180": 12,
         "180_270": 13,
@@ -49,6 +64,7 @@ const CALIBRACAO_ROTACAO = {
         "270_360": 11
     }
 };
+*/
 
 let pidConfig = {
     anguloAbsoluto: 0.0, 
@@ -168,7 +184,6 @@ function alinharMotor(angDestino) {
     let dirAlinhamento = (distAumenta <= distDiminui) ? DIR_AUMENTA : DIR_DIMINUI;
     let distancia = Math.min(distAumenta, distDiminui);
 
-    // Substituição pela Nova Lógica de Dicionário
     const calc = calcularTempoFisico(pidConfig.anguloAbsoluto, distancia, dirAlinhamento);
     let tempoBruto = calc.tempoTotalBruto;
     let taxaMedia = calc.taxaMedia;
@@ -266,15 +281,17 @@ parser.on('data', async (data) => {
 
     console.log(`[\x1b[36mARDUINO\x1b[0m] ${msg}`);
 
-    if ((msg === 'STANDBY' || msg.startsWith('[PID_FEEDBACK]')) && sistemaOcupado) {
+    // Utilizando .includes para garantir compatibilidade com caracteres de controle e cores ANSI enviados pelo Arduino
+    if ((msg.includes('STANDBY') || msg.includes('[PID_FEEDBACK]')) && sistemaOcupado) {
         if (aguardandoAlinhamento) {
             aguardandoAlinhamento = false;
             
             if (alinhamentoPendente) {
+                const distReal = alinhamentoPendente.distanciaReal || 0;
                 if (alinhamentoPendente.direcao === DIR_AUMENTA) {
-                    pidConfig.anguloAbsoluto = (pidConfig.anguloAbsoluto + alinhamentoPendente.distanciaReal) % 360;
+                    pidConfig.anguloAbsoluto = (pidConfig.anguloAbsoluto + distReal) % 360;
                 } else {
-                    pidConfig.anguloAbsoluto = (pidConfig.anguloAbsoluto - alinhamentoPendente.distanciaReal + 360) % 360;
+                    pidConfig.anguloAbsoluto = (pidConfig.anguloAbsoluto - distReal + 360) % 360;
                 }
                 pidConfig.ultimaDirecao = alinhamentoPendente.direcao;
                 alinhamentoPendente = null;
@@ -285,10 +302,11 @@ parser.on('data', async (data) => {
             
         } else {
             if (tarefaPendente) {
+                const distReal = tarefaPendente.distanciaReal || 0;
                 if (tarefaPendente.direcao === DIR_AUMENTA) {
-                    pidConfig.anguloAbsoluto = (pidConfig.anguloAbsoluto + tarefaPendente.distanciaReal) % 360;
+                    pidConfig.anguloAbsoluto = (pidConfig.anguloAbsoluto + distReal) % 360;
                 } else {
-                    pidConfig.anguloAbsoluto = (pidConfig.anguloAbsoluto - tarefaPendente.distanciaReal + 360) % 360;
+                    pidConfig.anguloAbsoluto = (pidConfig.anguloAbsoluto - distReal + 360) % 360;
                 }
                 pidConfig.ultimaDirecao = tarefaPendente.direcao;
                 tarefaPendente = null;
@@ -298,23 +316,16 @@ parser.on('data', async (data) => {
             
             if (timeoutSeguranca) clearTimeout(timeoutSeguranca);
 
-            if (usarCLP && client.isOpen) {
-                try {
-                    await client.writeCoil(0, false); 
-                    await client.writeCoil(10, true); 
-                    setTimeout(async () => {
-                        if (client.isOpen) {
-                            try { await client.writeCoil(10, false); } 
-                            catch (err) { tratarErroModbus(err); }
-                        }
-                    }, 2000);
-                } catch (e) { tratarErroModbus(e); }
-            }
+            // A escrita M0 = false e M10 = true foi totalmente REMOVIDA DAQUI.
+            // A responsabilidade de setar o M10 agora é exclusivamente do T100 no Ladder.
+            // O Worker detecta isso sem a interferência do Bridge.
+
             sistemaOcupado = false; 
         }
     }
     
-    if (msg === '[SYS] FREE_STOP' || msg === 'LIVRE') {
+    // Mesma lógica de includes para destravamentos
+    if (msg.includes('FREE_STOP') || msg.includes('LIVRE')) {
         if (timeoutSeguranca) clearTimeout(timeoutSeguranca); 
         sistemaOcupado = false;
     }
@@ -418,7 +429,8 @@ async function iniciarModbus() {
         client.setID(1); 
 
         setInterval(async () => {
-            if (sistemaOcupado) return; 
+            // Removido 'if (sistemaOcupado) return;' 
+            // Agora o loop continua rodando para atualizar o estado da borda (ultimoM0)
 
             if (!client.isOpen) {
                 try {
@@ -429,42 +441,51 @@ async function iniciarModbus() {
 
             try {
                 const coils = await client.readCoils(0, 3);
+                const atualM0 = coils.data[0];
                 
-                if (coils.data[0]) { 
-                    const bombaAtiva = coils.data[1]; 
-                    const direcaoCorrigida = coils.data[2] ? 1 : 0; 
-                    const regs = await client.readHoldingRegisters(100, 6); 
-                    
-                    const angInicial = (regs.data[1] << 16) | regs.data[0];
-                    const angFinal = (regs.data[3] << 16) | regs.data[2];
+                // GATILHO NA BORDA DE SUBIDA (De False para True)
+                if (atualM0 && !ultimoM0) { 
+                    if (!sistemaOcupado) {
+                        const bombaAtiva = coils.data[1]; 
+                        const direcaoCorrigida = coils.data[2] ? 1 : 0; 
+                        const regs = await client.readHoldingRegisters(100, 6); 
+                        
+                        const angInicial = (regs.data[1] << 16) | regs.data[0];
+                        const angFinal = (regs.data[3] << 16) | regs.data[2];
 
-                    console.log(`[\x1b[33mCLP\x1b[0m] Identificado novo COMANDO.`);
-                    console.log(`  └─ Início: ${angInicial}º`);
-                    console.log(`  └─ Fim: ${angFinal}º `);
-                    console.log(`  └─ Dir: ${direcaoCorrigida}\n`);
-                    
-                    tarefaPendente = { angInicial, angFinal, direcao: direcaoCorrigida, bomba: bombaAtiva };
-                    sistemaOcupado = true; 
+                        console.log(`[\x1b[33mCLP\x1b[0m] Identificado novo COMANDO (Borda de Subida M0 detectada).`);
+                        console.log(`  └─ Início: ${angInicial}º`);
+                        console.log(`  └─ Fim: ${angFinal}º `);
+                        console.log(`  └─ Dir: ${direcaoCorrigida}\n`);
+                        
+                        tarefaPendente = { angInicial, angFinal, direcao: direcaoCorrigida, bomba: bombaAtiva };
+                        sistemaOcupado = true; 
 
-                    if (timeoutSeguranca) clearTimeout(timeoutSeguranca);
-                    timeoutSeguranca = setTimeout(() => {
-                        if (sistemaOcupado) {
-                            sistemaOcupado = false;
-                            tarefaPendente = null;
-                            aguardandoAlinhamento = false;
+                        if (timeoutSeguranca) clearTimeout(timeoutSeguranca);
+                        timeoutSeguranca = setTimeout(() => {
+                            if (sistemaOcupado) {
+                                sistemaOcupado = false;
+                                tarefaPendente = null;
+                                aguardandoAlinhamento = false;
+                            }
+                        }, 180000);
+
+                        let desvioAlinhamento = Math.abs(pidConfig.anguloAbsoluto - angInicial);
+                        if (desvioAlinhamento > 180) desvioAlinhamento = 360 - desvioAlinhamento;
+
+                        if (desvioAlinhamento > 1.0) {
+                            alinharMotor(angInicial);
+                        } else {
+                            console.log(`\n[\x1b[32mSISTEMA\x1b[0m] Motor já no ponto físico aceitável (${pidConfig.anguloAbsoluto.toFixed(2)}º). Pulando alinhamento explícito.\n`);
+                            executarTarefaPrincipal(tarefaPendente);
                         }
-                    }, 180000);
-
-                    let desvioAlinhamento = Math.abs(pidConfig.anguloAbsoluto - angInicial);
-                    if (desvioAlinhamento > 180) desvioAlinhamento = 360 - desvioAlinhamento;
-
-                    if (desvioAlinhamento > 1.0) {
-                        alinharMotor(angInicial);
                     } else {
-                        console.log(`\n[\x1b[32mSISTEMA\x1b[0m] Motor já no ponto físico aceitável (${pidConfig.anguloAbsoluto.toFixed(2)}º). Pulando alinhamento explícito.\n`);
-                        executarTarefaPrincipal(tarefaPendente);
+                        console.log(`[\x1b[33mCLP\x1b[0m] Aviso: M0 acionado, mas a Bridge ainda está ocupada com a movimentação física anterior.`);
                     }
                 }
+                
+                ultimoM0 = atualM0; // Atualiza a memória de borda
+
             } catch (e) {
                 tratarErroModbus(e);
             }

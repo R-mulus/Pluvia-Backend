@@ -6,7 +6,6 @@ import { registrarEvento } from './services/eventLogger.js';
 import { registrarConexao } from './services/connectLogger.js';
 import { EVENT_CODES } from './logs/eventCodes.js';
 
-
 const PLC_CONFIG = { host: "127.0.0.1", port: 10003 };
 const STATION_ID = 1;
 
@@ -21,6 +20,22 @@ const COIL_DONE = 10;       //M10
 const REG_ANG_INI = 100;    //D100 
 const REG_ANG_FIM = 102;    //D102
 const REG_VELOCIDADE = 104; //D104
+const REG_TEMPO = 114;      //D114 (Adicionado para sincronização com o Ladder)
+
+// --- CONSTANTES DE FÍSICA E CALIBRAÇÃO (Espelhadas do bridge.js) ---
+const DIR_AUMENTA = 0;      //HORARIO
+const DIR_DIMINUI = 1;      //ANTI_HORARIO
+
+const CALIBRACAO_ROTACAO = {
+    [DIR_AUMENTA]: { "0_90": 13, "90_180": 12, "180_270": 13, "270_360": 12 },
+    [DIR_DIMINUI]: { "0_90": 11, "90_180": 10, "180_270": 10, "270_360": 11 }
+};
+
+const pidConfigWorker = {
+    inerciaMs: 25,       
+    folgaReversaoMs: 40
+};
+// -------------------------------------------------------------------
 
 const TIMEOUT_SEGUNDOS = 300; 
 const TEMPO_ESPERA_ENTRE_PASSOS_MS = 5000; 
@@ -130,11 +145,76 @@ async function atualizarStatusPasso(id: string, status: StatusExecucao) {
     }
 }
 
+// CÁLCULO DE TEMPO ESTIMADO ESPELHADO DO BRIDGE.JS
+function calcularTempoFisicoPasso(anguloInicial: number, anguloFinal: number, direcaoBit: boolean): number {
+    const direcao = direcaoBit ? DIR_DIMINUI : DIR_AUMENTA;
+    let distancia = 0;
+    
+    if (direcao === DIR_AUMENTA) { 
+        distancia = (anguloFinal - anguloInicial + 360) % 360;
+    } else { 
+        distancia = (anguloInicial - anguloFinal + 360) % 360;
+    }
+
+    let tempoTotalBruto = 0;
+    let grausRestantes = distancia;
+    let anguloCursor = anguloInicial;
+
+    while (grausRestantes > 0.0001) {
+        let angNormalized = (anguloCursor % 360 + 360) % 360;
+        let segmentoAtual;
+        let limiteAumenta, limiteDiminui;
+
+        if (angNormalized >= 0 && angNormalized < 90) {
+            segmentoAtual = "0_90"; limiteAumenta = 90; limiteDiminui = 0;
+        } else if (angNormalized >= 90 && angNormalized < 180) {
+            segmentoAtual = "90_180"; limiteAumenta = 180; limiteDiminui = 90;
+        } else if (angNormalized >= 180 && angNormalized < 270) {
+            segmentoAtual = "180_270"; limiteAumenta = 270; limiteDiminui = 180;
+        } else {
+            segmentoAtual = "270_360"; limiteAumenta = 360; limiteDiminui = 270;
+        }
+
+        let grausNesteSegmento = 0;
+        if (direcao === DIR_AUMENTA) {
+            grausNesteSegmento = limiteAumenta - angNormalized;
+        } else {
+            grausNesteSegmento = angNormalized - limiteDiminui;
+            if (grausNesteSegmento === 0) { 
+                grausNesteSegmento = 90;
+                if (segmentoAtual === "0_90") segmentoAtual = "270_360";
+                else if (segmentoAtual === "90_180") segmentoAtual = "0_90";
+                else if (segmentoAtual === "180_270") segmentoAtual = "90_180";
+                else if (segmentoAtual === "270_360") segmentoAtual = "180_270";
+            }
+        }
+
+        let grausParaMover = Math.min(grausRestantes, grausNesteSegmento);
+        let taxaAplicada = CALIBRACAO_ROTACAO[direcao][segmentoAtual as keyof typeof CALIBRACAO_ROTACAO[typeof direcao]];
+
+        tempoTotalBruto += grausParaMover * taxaAplicada;
+        grausRestantes -= grausParaMover;
+
+        if (direcao === DIR_AUMENTA) {
+            anguloCursor += grausParaMover;
+        } else {
+            anguloCursor -= grausParaMover;
+        }
+    }
+
+    let tempoCorrigido = tempoTotalBruto - pidConfigWorker.inerciaMs; 
+    if (tempoCorrigido < 0) tempoCorrigido = 0;
+
+    // Como o Worker trata cada passo de forma isolada, aplicamos a folga de reversão 
+    // como margem de segurança extra para garantir o alinhamento com a Bridge.
+    let tempoComFolga = tempoCorrigido + pidConfigWorker.folgaReversaoMs;
+    
+    return Math.round(tempoComFolga);
+}
 
 // LÓGICA DA LIMPEZA DOS COILS E REGISTRADORES
 // Mesmo com essa limpeza o próprio ISPsoft não está limpando a memória.
 // Tem que dar um STOP e START no ladder pra limpar.
-
 async function executarLimpezaProfundaCLP(pivoId: string, contexto: string) {
     console.log(`\n[\x1b[33mLIMPEZA\x1b[0m] Iniciando limpeza de memória do CLP (${contexto})...`);
     try {
@@ -144,7 +224,8 @@ async function executarLimpezaProfundaCLP(pivoId: string, contexto: string) {
         await modbusWriteRegister(pivoId, REG_ANG_INI, 0);
         await modbusWriteRegister(pivoId, REG_ANG_FIM, 0);
         await modbusWriteRegister(pivoId, REG_VELOCIDADE, 0);
-        console.log(`  └─ [\x1b[32mOK\x1b[0m] Registradores resetados (Ang Incial, Ang Final, Vel).`);
+        await modbusWriteRegister(pivoId, REG_TEMPO, 0); // Limpa o D114
+        console.log(`  └─ [\x1b[32mOK\x1b[0m] Registradores resetados (Ang Incial, Ang Final, Vel, Tempo D114).`);
         await sleep(100);
 
         //Zera Coils
@@ -180,11 +261,25 @@ async function executarPasso(passo: any, pivoId: string, cronogramaId: string) {
     await modbusWriteCoil(pivoId, COIL_DONE, false);
     await sleep(200);
 
+    const direcaoBit = (passo.direcao === 'REVERSO' || passo.direcao === 'ANTI_HORARIO') ? true : false; //Nome no banco pode ser tanto ANTI_HORARIO quanto REVERSO
+
+    // --- CÁLCULO DE TEMPO PARA O LADDER (D114) ---
+    let tempoEstimadoMs = calcularTempoFisicoPasso(passo.angulo_inicial, passo.angulo_final, direcaoBit);
+    
+    // CONVERSÃO PARA A BASE DO TEMPORIZADOR DO CLP (T100) ---------------------------------------------------------------------------------------------------------
+    // CLPs Delta geralmente usam base 100ms em T0-T111 e T128-T199.
+    // Assim, 5000ms passam a ser 50.
+    const FATOR_CLP_TIMER = 100; 
+    const valorD114 = Math.ceil((tempoEstimadoMs / FATOR_CLP_TIMER) + 100);
+    
+    await modbusWriteRegister(pivoId, REG_TEMPO, valorD114);
+    console.log(`[\x1b[36mCÁLCULO LADDER\x1b[0m] Tempo físico: ${tempoEstimadoMs}ms -> Base do Timer CLP (100ms). Gravado em D114: ${valorD114}`);
+    // ---------------------------------------------
+
     await modbusWriteRegister(pivoId, REG_ANG_INI, passo.angulo_inicial);
     await modbusWriteRegister(pivoId, REG_ANG_FIM, passo.angulo_final);
     await modbusWriteRegister(pivoId, REG_VELOCIDADE, passo.percentimetro);
     
-    const direcaoBit = (passo.direcao === 'REVERSO' || passo.direcao === 'ANTI_HORARIO') ? true : false; //Nome no banco pode ser tanto ANTI_HORARIO quanto REVERSO
     await modbusWriteCoil(pivoId, COIL_DIRECAO, direcaoBit);
     await modbusWriteCoil(pivoId, COIL_BOMBA, passo.irrigacao);
 

@@ -1,9 +1,6 @@
 import readline from 'readline';
 import { supabase } from './config/supabase.js';
 
-// ============================================================================
-// TIPAGENS DO NOVO SCHEMA
-// ============================================================================
 interface CronogramaParams {
     pivo_id: string;
     criado_por: string;
@@ -27,12 +24,7 @@ interface CronogramaCompletoParams extends CronogramaParams {
     etapas: (Omit<PassoManualParams, 'cronograma_id' | 'pivo_id' | 'ordem'> | { preset_id: string })[];
 }
 
-// ============================================================================
-// 1. CRIAR CRONOGRAMA
-// ============================================================================
 export async function criarCronograma(params: CronogramaParams): Promise<string> {
-    // CORREÇÃO DA CONSTRAINT: Passo a Passo (Busca e Desativa)
-    // 1. Busca os cronogramas que estão bloqueando o pivô
     const { data: ativos, error: errBusca } = await supabase
         .from('cronogramas')
         .select('id')
@@ -41,7 +33,6 @@ export async function criarCronograma(params: CronogramaParams): Promise<string>
 
     if (errBusca) throw new Error(`Erro ao verificar cronogramas ativos: ${errBusca.message}`);
 
-    // 2. Se encontrou, desativa um por um explicitamente
     if (ativos && ativos.length > 0) {
         console.log(`\n[AVISO] Encontrado(s) ${ativos.length} cronograma(s) ativo(s) para este pivô. Interrompendo para liberar espaço...`);
         for (const cronograma of ativos) {
@@ -49,7 +40,7 @@ export async function criarCronograma(params: CronogramaParams): Promise<string>
                 .from('cronogramas')
                 .update({ 
                     is_ativo: false,
-                    status_final: 'interrompido' // <-- Corrigido para o valor exato do ENUM
+                    status_final: 'interrompido' //Corrigido para o valor exato do ENUM
                 })
                 .eq('id', cronograma.id);
             
@@ -59,7 +50,6 @@ export async function criarCronograma(params: CronogramaParams): Promise<string>
         }
     }
 
-    // 3. Agora insere com segurança
     const { data, error } = await supabase
         .from('cronogramas')
         .insert([{
@@ -77,9 +67,6 @@ export async function criarCronograma(params: CronogramaParams): Promise<string>
     return data.id;
 }
 
-// ============================================================================
-// 2. ADICIONAR PASSO MANUAL
-// ============================================================================
 export async function adicionarPassoManual(params: PassoManualParams): Promise<string> {
     const { data, error } = await supabase
         .from('cronograma_passos')
@@ -94,9 +81,6 @@ export async function adicionarPassoManual(params: PassoManualParams): Promise<s
     return data.id;
 }
 
-// ============================================================================
-// 3. ADICIONAR PRESET AO CRONOGRAMA
-// ============================================================================
 export async function adicionarPresetAoCronograma(cronogramaId: string, presetId: string, ordem: number, pivoId: string): Promise<string> {
     const { data: preset, error: errPreset } = await supabase
         .from('presets')
@@ -128,9 +112,6 @@ export async function adicionarPresetAoCronograma(cronogramaId: string, presetId
     return data.id;
 }
 
-// ============================================================================
-// 5. CRIAR CRONOGRAMA COMPLETO (Helper)
-// ============================================================================
 export async function criarCronogramaCompleto(params: CronogramaCompletoParams) {
     console.log(`\n[AGENDADOR] Gerando cronograma completo: ${params.nome}`);
     const cronogramaId = await criarCronograma(params);
@@ -155,9 +136,6 @@ export async function criarCronogramaCompleto(params: CronogramaCompletoParams) 
     return cronogramaId;
 }
 
-// ============================================================================
-// 6. LISTAR CRONOGRAMAS
-// ============================================================================
 export async function listarCronogramas() {
     const { data, error } = await supabase
         .from('cronogramas')
@@ -166,7 +144,6 @@ export async function listarCronogramas() {
 
     if (error) throw new Error(`Erro ao listar cronogramas: ${error.message}`);
     
-    // Formata a exibição para não mostrar a conversão UTC no terminal, alinhando com o que o worker lê.
     const cronogramasFormatados = data.map((c: any) => ({
         ...c,
         horario_inicio: c.horario_inicio.replace(/(Z|[+-]\d{2}:\d{2})$/, '').replace('T', ' ')
@@ -175,9 +152,6 @@ export async function listarCronogramas() {
     return cronogramasFormatados;
 }
 
-// ============================================================================
-// 7. LISTAR PASSOS DE UM CRONOGRAMA
-// ============================================================================
 export async function listarPassos(cronogramaId: string) {
     const { data, error } = await supabase
         .from('cronograma_passos')
@@ -189,9 +163,6 @@ export async function listarPassos(cronogramaId: string) {
     return data;
 }
 
-// ============================================================================
-// 8. REORDENAR ETAPAS
-// ============================================================================
 export async function reordenarEtapas(atualizacoes: { id: string, nova_ordem: number }[]) {
     for (const item of atualizacoes) {
         const { error } = await supabase
@@ -204,9 +175,6 @@ export async function reordenarEtapas(atualizacoes: { id: string, nova_ordem: nu
     console.log("[AGENDADOR] Passos reordenados com sucesso.");
 }
 
-// ============================================================================
-// 9. REMOVER ETAPA (E Reorganizar)
-// ============================================================================
 export async function removerPasso(passoId: string, cronogramaId: string) {
     const { error: deleteErr } = await supabase.from('cronograma_passos').delete().eq('id', passoId);
     if (deleteErr) throw new Error(`Erro ao deletar passo: ${deleteErr.message}`);
@@ -223,15 +191,12 @@ export async function removerPasso(passoId: string, cronogramaId: string) {
     console.log(`[AGENDADOR] Passo removido e ordem do cronograma reorganizada.`);
 }
 
-// ============================================================================
-// 10. CANCELAR CRONOGRAMA
-// ============================================================================
 export async function cancelarCronograma(cronogramaId: string) {
     const { error } = await supabase
         .from('cronogramas')
         .update({ 
             is_ativo: false,
-            status_final: 'interrompido' // <-- Corrigido para o valor exato do ENUM
+            status_final: 'interrompido'
         })
         .eq('id', cronogramaId);
 
@@ -239,9 +204,6 @@ export async function cancelarCronograma(cronogramaId: string) {
     console.log(`[AGENDADOR] Cronograma ${cronogramaId} cancelado (status: interrompido).`);
 }
 
-// ============================================================================
-// 11. DUPLICAR CRONOGRAMA
-// ============================================================================
 export async function duplicarCronograma(cronogramaId: string, novoCriadoPor: string) {
     const { data: original, error: errOrig } = await supabase
         .from('cronogramas')
@@ -278,9 +240,6 @@ export async function duplicarCronograma(cronogramaId: string, novoCriadoPor: st
     return novoCronogramaId;
 }
 
-// ============================================================================
-// FUNÇÃO AUXILIAR DE FORMATAÇÃO DE DIREÇÃO (Para o CHECK Constraint do Banco)
-// ============================================================================
 function formatarDirecao(direcao: string): 'HORARIO' | 'ANTI_HORARIO' {
     const formatada = direcao.toUpperCase().trim();
     if (formatada === 'REVERSO' || formatada === 'ANTI-HORARIO' || formatada === 'ANTI_HORARIO') {
@@ -289,9 +248,6 @@ function formatarDirecao(direcao: string): 'HORARIO' | 'ANTI_HORARIO' {
     return 'HORARIO';
 }
 
-// ============================================================================
-// INTERFACE DE TERMINAL (CLI INTERATIVA COMPLETA)
-// ============================================================================
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const perguntar = (pergunta: string): Promise<string> => new Promise(resolve => rl.question(pergunta, resolve));
 
@@ -310,7 +266,6 @@ async function iniciarCLI() {
         const usuarioId = usuarios[0].id;
 
         while (true) {
-            // BLOCO TRY CATCH INTERNO: Evita que erros de UUID quebrem a aplicação inteira
             try {
                 console.log(`\n--- Conectado como: ${usuarios[0].nome} | Pivô: ${pivos[0].nome_pivo} ---`);
                 console.log("1. Criar Novo Cronograma (Digitar Preferências Manuais/Presets)");
@@ -328,18 +283,14 @@ async function iniciarCLI() {
                     case '1': {
                         const nome = await perguntar("Nome do cronograma (ex: Rega Noturna): ");
                         const horario = await perguntar("Horário de início (HH:mm): ");
-                        
-                        // --- CORREÇÃO DE ALINHAMENTO COM O WORKER ---
-                        // Pega a data local garantindo que o "dia" será o mesmo do relógio local
+
                         const agora = new Date();
                         const ano = agora.getFullYear();
                         const mes = String(agora.getMonth() + 1).padStart(2, '0');
                         const dia = String(agora.getDate()).padStart(2, '0');
                         const dataHojeLocal = `${ano}-${mes}-${dia}`;
                         
-                        // Para funcionar perfeitamente com a "solução cirúrgica" do worker, cravamos os 
-                        // números exatos que o utilizador digitou no banco de dados usando a tag +00:00.
-                        const horarioInicioFormatado = `${dataHojeLocal}T${horario}:00+00:00`;
+                        const horarioInicioFormatado = `${dataHojeLocal}T${horario}:00+00:00`; // A PARADA DE DESATIVAR O FUSO HORARIO LÁ
                         
                         const etapas = [];
                         let adicionarMais = true;
@@ -355,7 +306,6 @@ async function iniciarCLI() {
                                     console.log("⚠️ Nenhum preset encontrado no banco. Tente adicionar manualmente.");
                                 } else {
                                     console.log("\n--- Presets Disponíveis ---");
-                                    // Mostra os presets com um índice em vez de exigir a digitação do UUID
                                     presets.forEach((p, idx) => {
                                         console.log(`[${idx}] - ${p.nome} (Lâmina: ${p.lamina}mm)`);
                                     });
@@ -454,7 +404,6 @@ async function iniciarCLI() {
                         console.log("\n--- Passos Deste Cronograma ---");
                         passos.forEach((p, idx) => console.log(`[${idx}] - Ordem: ${p.ordem} | Nome: ${p.nome}`));
                         
-                        // Utilizando índice numérico para remover, facilitando a vida
                         const passoIdxStr = await perguntar("\nDigite o NÚMERO (índice) do Passo que deseja apagar: ");
                         const passoIdx = parseInt(passoIdxStr);
                         
@@ -478,7 +427,7 @@ async function iniciarCLI() {
                     case '8': {
                         console.log("Encerrando CLI...");
                         rl.close();
-                        return; // Sai do laço while(true)
+                        return;
                     }
                     default:
                         console.log("Opção inválida, tente novamente.");
@@ -496,7 +445,6 @@ async function iniciarCLI() {
     }
 }
 
-// Executa automaticamente a interface de terminal
 if (process.argv[1] && process.argv[1].endsWith('cli-agendador.ts')) {
     iniciarCLI();
 }

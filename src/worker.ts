@@ -6,18 +6,36 @@ import { registrarEvento } from './services/eventLogger.js';
 import { registrarConexao } from './services/connectLogger.js';
 import { EVENT_CODES } from './logs/eventCodes.js';
 
-// --- CONFIGURAÇÕES E CONSTANTES ---
 const PLC_CONFIG = { host: "127.0.0.1", port: 10003 };
 const STATION_ID = 1;
 
-const COIL_START = 0;      
-const COIL_BOMBA = 1;      
-const COIL_DIRECAO = 2;    
-const COIL_DONE = 10;      
+// ENDEREÇOS FÍSICOS/VIRTUAIS DA MEMÓRIA
+// Coils 
+const COIL_START = 0;       //M0
+const COIL_BOMBA = 1;       //M1
+const COIL_DIRECAO = 2;     //M2
+const COIL_DONE = 10;       //M10
 
-const REG_ANG_INI = 100;   
-const REG_ANG_FIM = 102;   
-const REG_VELOCIDADE = 104;
+//Registradores
+const REG_ANG_INI = 100;    //D100 
+const REG_ANG_FIM = 102;    //D102
+const REG_VELOCIDADE = 104; //D104
+const REG_TEMPO = 114;      //D114 (Adicionado para sincronização com o Ladder)
+
+// --- CONSTANTES DE FÍSICA E CALIBRAÇÃO (Espelhadas do bridge.js) ---
+const DIR_AUMENTA = 0;      //HORARIO
+const DIR_DIMINUI = 1;      //ANTI_HORARIO
+
+const CALIBRACAO_ROTACAO = {
+    [DIR_AUMENTA]: { "0_90": 13, "90_180": 12, "180_270": 13, "270_360": 12 },
+    [DIR_DIMINUI]: { "0_90": 11, "90_180": 10, "180_270": 10, "270_360": 11 }
+};
+
+const pidConfigWorker = {
+    inerciaMs: 25,       
+    folgaReversaoMs: 40
+};
+// -------------------------------------------------------------------
 
 const TIMEOUT_SEGUNDOS = 300; 
 const TEMPO_ESPERA_ENTRE_PASSOS_MS = 5000; 
@@ -25,27 +43,24 @@ const JANELA_PRECISAO_MS = 60000; // Janela de 1 minuto
 
 const client = new (ModbusRTU as any)();
 
-// --- SISTEMA DE LOCKS E ESTADOS ---
+// SISTEMA DE LOCKS E ESTADOS
 let workerExecutando = false;
 let sistemaOciosoConfirmado = false; 
 const pivosEmExecucao = new Set<string>();
 const cronogramasEmProcessamento = new Set<string>(); 
 
-// NOVO: Set exclusivo para logs detalhados sem poluir o terminal a cada 5 segundos
 const cronogramasDiagnosticados = new Set<string>(); 
 let modbusConectado = false;
 
-// --- TIPAGEM DE STATUS ---
-type StatusExecucao = 'aguardando' | 'executando' | 'concluido' | 'falha' | 'cancelado' | 'interrompido';
+type StatusExecucao = 'aguardando' | 'executando' | 'concluido' | 'falha' | 'cancelado' | 'interrompido'; //ENUM_TYPES do Status
 
-// --- UTILITÁRIOS ---
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- CONEXÃO MODBUS ---
+// CONEXÃO MODBUS
 async function conectarModbus() {
     if (modbusConectado) return true;
     
-    // Captura o tempo antes de tentar a conexão
+    // Guarda o tempo antes de tentar a conexão
     const tempoInicio = Date.now();
     
     try {
@@ -59,8 +74,7 @@ async function conectarModbus() {
         
         console.log(`[\x1b[32mMODBUS\x1b[0m] Conectado ao CLP/COMMGR em ${PLC_CONFIG.host}:${PLC_CONFIG.port} (Latência: ${latenciaCalculada}ms)`);
         
-        // Envia statusConexao E latenciaMs
-        await registrarConexao({ statusConexao: true, latenciaMs: latenciaCalculada });
+        await registrarConexao({ statusConexao: true, latenciaMs: latenciaCalculada });    //Latencia armazenada no banco
         
         return true;
     } catch (error) {
@@ -73,7 +87,7 @@ async function conectarModbus() {
     }
 }
 
-// --- FUNÇÕES MODBUS WRAPPERS ---
+// FUNÇÕES MODBUS WRAPPERS
 async function modbusWriteCoil(pivoId: string, address: number, state: boolean): Promise<boolean> {
     if (!await conectarModbus()) return false;
     try {
@@ -108,13 +122,6 @@ async function modbusReadCoils(pivoId: string, address: number, length: number):
     }
 }
 
-// ============================================================================
-// FUNÇÕES DE ATUALIZAÇÃO DE ESTADO NO BANCO DE DADOS
-// ============================================================================
-
-/**
- * Atualiza o status geral de um cronograma e, opcionalmente, o seu estado de atividade.
- */
 async function atualizarStatusCronograma(id: string, status: StatusExecucao, isAtivo?: boolean) {
     try {
         const payload: any = { status_final: status };
@@ -129,9 +136,6 @@ async function atualizarStatusCronograma(id: string, status: StatusExecucao, isA
     }
 }
 
-/**
- * Atualiza o status individual de um passo do cronograma.
- */
 async function atualizarStatusPasso(id: string, status: StatusExecucao) {
     try {
         const { error } = await supabase.from('cronograma_passos').update({ status_passo: status }).eq('id', id);
@@ -141,22 +145,90 @@ async function atualizarStatusPasso(id: string, status: StatusExecucao) {
     }
 }
 
-// ============================================================================
-// LÓGICA DE LIMPEZA PRECISA E MINIMALISTA
-// ============================================================================
+// CÁLCULO DE TEMPO ESTIMADO ESPELHADO DO BRIDGE.JS
+function calcularTempoFisicoPasso(anguloInicial: number, anguloFinal: number, direcaoBit: boolean): number {
+    const direcao = direcaoBit ? DIR_DIMINUI : DIR_AUMENTA;
+    let distancia = 0;
+    
+    if (direcao === DIR_AUMENTA) { 
+        distancia = (anguloFinal - anguloInicial + 360) % 360;
+    } else { 
+        distancia = (anguloInicial - anguloFinal + 360) % 360;
+    }
+
+    let tempoTotalBruto = 0;
+    let grausRestantes = distancia;
+    let anguloCursor = anguloInicial;
+
+    while (grausRestantes > 0.0001) {
+        let angNormalized = (anguloCursor % 360 + 360) % 360;
+        let segmentoAtual;
+        let limiteAumenta, limiteDiminui;
+
+        if (angNormalized >= 0 && angNormalized < 90) {
+            segmentoAtual = "0_90"; limiteAumenta = 90; limiteDiminui = 0;
+        } else if (angNormalized >= 90 && angNormalized < 180) {
+            segmentoAtual = "90_180"; limiteAumenta = 180; limiteDiminui = 90;
+        } else if (angNormalized >= 180 && angNormalized < 270) {
+            segmentoAtual = "180_270"; limiteAumenta = 270; limiteDiminui = 180;
+        } else {
+            segmentoAtual = "270_360"; limiteAumenta = 360; limiteDiminui = 270;
+        }
+
+        let grausNesteSegmento = 0;
+        if (direcao === DIR_AUMENTA) {
+            grausNesteSegmento = limiteAumenta - angNormalized;
+        } else {
+            grausNesteSegmento = angNormalized - limiteDiminui;
+            if (grausNesteSegmento === 0) { 
+                grausNesteSegmento = 90;
+                if (segmentoAtual === "0_90") segmentoAtual = "270_360";
+                else if (segmentoAtual === "90_180") segmentoAtual = "0_90";
+                else if (segmentoAtual === "180_270") segmentoAtual = "90_180";
+                else if (segmentoAtual === "270_360") segmentoAtual = "180_270";
+            }
+        }
+
+        let grausParaMover = Math.min(grausRestantes, grausNesteSegmento);
+        let taxaAplicada = CALIBRACAO_ROTACAO[direcao][segmentoAtual as keyof typeof CALIBRACAO_ROTACAO[typeof direcao]];
+
+        tempoTotalBruto += grausParaMover * taxaAplicada;
+        grausRestantes -= grausParaMover;
+
+        if (direcao === DIR_AUMENTA) {
+            anguloCursor += grausParaMover;
+        } else {
+            anguloCursor -= grausParaMover;
+        }
+    }
+
+    let tempoCorrigido = tempoTotalBruto - pidConfigWorker.inerciaMs; 
+    if (tempoCorrigido < 0) tempoCorrigido = 0;
+
+    // Como o Worker trata cada passo de forma isolada, aplicamos a folga de reversão 
+    // como margem de segurança extra para garantir o alinhamento com a Bridge.
+    let tempoComFolga = tempoCorrigido + pidConfigWorker.folgaReversaoMs;
+    
+    return Math.round(tempoComFolga);
+}
+
+// LÓGICA DA LIMPEZA DOS COILS E REGISTRADORES
+// Mesmo com essa limpeza o próprio ISPsoft não está limpando a memória.
+// Tem que dar um STOP e START no ladder pra limpar.
 async function executarLimpezaProfundaCLP(pivoId: string, contexto: string) {
     console.log(`\n[\x1b[33mLIMPEZA\x1b[0m] Iniciando limpeza de memória do CLP (${contexto})...`);
     try {
         if (!await conectarModbus()) return;
 
-        // 1. Zera Registradores
+        //Zera Registradores
         await modbusWriteRegister(pivoId, REG_ANG_INI, 0);
         await modbusWriteRegister(pivoId, REG_ANG_FIM, 0);
         await modbusWriteRegister(pivoId, REG_VELOCIDADE, 0);
-        console.log(`  └─ [\x1b[32mOK\x1b[0m] Registradores resetados (Ang Incial, Ang Final, Vel).`);
+        await modbusWriteRegister(pivoId, REG_TEMPO, 0); // Limpa o D114
+        console.log(`  └─ [\x1b[32mOK\x1b[0m] Registradores resetados (Ang Incial, Ang Final, Vel, Tempo D114).`);
         await sleep(100);
 
-        // 2. Zera Coils
+        //Zera Coils
         await modbusWriteCoil(pivoId, COIL_START, false);
         await modbusWriteCoil(pivoId, COIL_BOMBA, false);
         await modbusWriteCoil(pivoId, COIL_DIRECAO, false);
@@ -165,7 +237,7 @@ async function executarLimpezaProfundaCLP(pivoId: string, contexto: string) {
         
         await sleep(250); 
 
-        // 3. Validação de Standby e Confirmação de Limpeza
+        //Validação e Confirmação de Limpeza
         const checkCoils = await modbusReadCoils(pivoId, COIL_START, 11);
         if (checkCoils && checkCoils[COIL_START] === false && checkCoils[COIL_DONE] === false) {
             console.log(`  └─ [\x1b[32mOK\x1b[0m] Confirmação do reset do coil M10 verificada no CLP.`);
@@ -178,23 +250,36 @@ async function executarLimpezaProfundaCLP(pivoId: string, contexto: string) {
     }
 }
 
-// --- LÓGICA DE EXECUÇÃO ---
 
+// --- LÓGICA DE EXECUÇÃO ---
 async function executarPasso(passo: any, pivoId: string, cronogramaId: string) {
     console.log(`\n[\x1b[35mEXECUTANDO\x1b[0m] Iniciando Passo ${passo.ordem} do Cronograma ${cronogramaId}`);
     
-    // Atualiza status do passo no banco para executando
     await atualizarStatusPasso(passo.id, 'executando');
 
     await modbusWriteCoil(pivoId, COIL_START, false);
     await modbusWriteCoil(pivoId, COIL_DONE, false);
     await sleep(200);
 
+    const direcaoBit = (passo.direcao === 'REVERSO' || passo.direcao === 'ANTI_HORARIO') ? true : false; //Nome no banco pode ser tanto ANTI_HORARIO quanto REVERSO
+
+    // --- CÁLCULO DE TEMPO PARA O LADDER (D114) ---
+    let tempoEstimadoMs = calcularTempoFisicoPasso(passo.angulo_inicial, passo.angulo_final, direcaoBit);
+    
+    // CONVERSÃO PARA A BASE DO TEMPORIZADOR DO CLP (T100) ---------------------------------------------------------------------------------------------------------
+    // CLPs Delta geralmente usam base 100ms em T0-T111 e T128-T199.
+    // Assim, 5000ms passam a ser 50.
+    const FATOR_CLP_TIMER = 100; 
+    const valorD114 = Math.ceil((tempoEstimadoMs / FATOR_CLP_TIMER) + 100);
+    
+    await modbusWriteRegister(pivoId, REG_TEMPO, valorD114);
+    console.log(`[\x1b[36mCÁLCULO LADDER\x1b[0m] Tempo físico: ${tempoEstimadoMs}ms -> Base do Timer CLP (100ms). Gravado em D114: ${valorD114}`);
+    // ---------------------------------------------
+
     await modbusWriteRegister(pivoId, REG_ANG_INI, passo.angulo_inicial);
     await modbusWriteRegister(pivoId, REG_ANG_FIM, passo.angulo_final);
     await modbusWriteRegister(pivoId, REG_VELOCIDADE, passo.percentimetro);
     
-    const direcaoBit = (passo.direcao === 'REVERSO' || passo.direcao === 'ANTI_HORARIO') ? true : false; //Nome no banco pode ser tanto ANTI_HORARIO quanto REVERSO
     await modbusWriteCoil(pivoId, COIL_DIRECAO, direcaoBit);
     await modbusWriteCoil(pivoId, COIL_BOMBA, passo.irrigacao);
 
@@ -204,7 +289,10 @@ async function executarPasso(passo: any, pivoId: string, cronogramaId: string) {
     const tempoInicio = Date.now();
     let passoConcluido = false;
     
-    // --- PROBLEMA 2: AJUSTES PRECISOS NO POLLING DO M10 ---
+    //AJUSTES NO POLLING DO M10
+    //O gatilho de conclusão tbm tá ruim de ser lido
+    //Eu acho que ele tá ativando rápido demais e o worker não lê.
+
     let ultimoEstadoM10: boolean | null = null;
     let leituras = 0;
     console.log(`[\x1b[36mPOLLING\x1b[0m] Início do polling no coil M10. Frequência reajustada: 20ms...`);
@@ -254,7 +342,6 @@ async function processarCronograma(cronograma: any) {
     console.log(`[\x1b[36mCRONOGRAMA\x1b[0m] Iniciando Cronograma ID: ${cronograma.id}`);
     
     try {
-        // Marca o Cronograma como em andamento
         await atualizarStatusCronograma(cronograma.id, 'executando');
 
         const { data: passos, error } = await supabase
@@ -274,27 +361,29 @@ async function processarCronograma(cronograma: any) {
             }
         }
 
-        // Finaliza cronograma com sucesso, marcando-o como concluído e definindo "is_ativo" como FALSE
         await atualizarStatusCronograma(cronograma.id, 'concluido', false);
         console.log(`[\x1b[32mCONCLUÍDO\x1b[0m] Cronograma ${cronograma.id} finalizado com sucesso!`);
-        
+
         await executarLimpezaProfundaCLP(cronograma.pivo_id, "Fim de Cronograma");
 
     } catch (err: any) {
         console.error(`[\x1b[31mFALHA\x1b[0m] Erro no Cronograma ${cronograma.id}:`, err.message);
         
-        // Em caso de falha/timeout, marca como falho e encerra (is_ativo = false)
+        // Em caso de falha/timeout, atualiza o status como falha e defini "is_ativo" como FALSE
+
         await atualizarStatusCronograma(cronograma.id, 'falha', false);
         await registrarEvento({ tipoEvento: 'erro', codigo: EVENT_CODES.ERRO_WORKER });
         
         await executarLimpezaProfundaCLP(cronograma.pivo_id, "Falha/Aborto");
+
+        // --------------------------------------------------------------------------------------
 
     } finally {
         pivosEmExecucao.delete(cronograma.pivo_id);
     }
 }
 
-// --- LOOP PRINCIPAL ---
+// LOOP PRINCIPAL ---------
 
 async function iniciarWorker() {
     console.log("[\x1b[36mPLUVIA WORKER\x1b[0m] Inicializado. Aguardando cronogramas...");
@@ -314,7 +403,6 @@ async function iniciarWorker() {
                     sistemaOciosoConfirmado = false; 
                 }
 
-                // O relógio atual da máquina local em milissegundos
                 const agora = Date.now();
 
                 const { data: cronogramas, error } = await supabase
@@ -329,10 +417,11 @@ async function iniciarWorker() {
                     if (cronogramasEmProcessamento.has(cronograma.id)) continue;
                     if (pivosEmExecucao.has(cronograma.pivo_id)) continue;
 
-                    // --- SOLUÇÃO CIRÚRGICA DE FUSO HORÁRIO ---
-                    // Remove silenciosamente as tags de fuso horário da string ("Z" ou "+00:00")
+                    // SOLUÇÃO PRO FUSO HORÁRIO
+                    // Remove as tags de fuso horário da string ("Z" ou "+00:00")
                     // Ex: '2026-05-29T16:18:00+00:00' vira '2026-05-29T16:18:00'
                     // Isso obriga o JS a interpretar o 16:18 como horário local, alinhando com o Date.now().
+
                     const dataStringLimpa = cronograma.horario_inicio.replace(/(Z|[+-]\d{2}:\d{2})$/, '');
                     const horarioAgendado = new Date(dataStringLimpa).getTime();
                     
@@ -340,7 +429,6 @@ async function iniciarWorker() {
 
                     const tempoRestante = horarioAgendado - agora;
 
-                    // Exibe a análise profunda apenas 1x
                     if (!cronogramasDiagnosticados.has(cronograma.id)) {
                         console.log(`\n======================================================`);
                         console.log(`[\x1b[36mANÁLISE DE AGENDAMENTO\x1b[0m] Identificado novo cronograma.`);
@@ -388,5 +476,4 @@ async function iniciarWorker() {
     }
 }
 
-// Inicia a aplicação
 iniciarWorker();
